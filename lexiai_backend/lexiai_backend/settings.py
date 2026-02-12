@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
 import os
+import warnings
 from pathlib import Path
 from dotenv import load_dotenv 
 
@@ -46,12 +47,26 @@ if missing_db_vars:
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-r25=40e(x9mhu9(fpa@#cjpb2e0w-yd2y$up8a&krp*it5&h25'
+SECRET_KEY = os.getenv('SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv('DEBUG', 'False').strip().lower() in {'1', 'true', 'yes', 'on'}
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in os.getenv('ALLOWED_HOSTS', '').split(',')
+    if host.strip()
+]
+
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = 'dev-unsafe-secret-key-change-me'
+        warnings.warn(
+            'SECRET_KEY missing; using development fallback. Set SECRET_KEY in .env',
+            RuntimeWarning,
+        )
+    else:
+        raise RuntimeError(f"SECRET_KEY missing; tried {ENV_PATH}")
 
 
 # Application definition
