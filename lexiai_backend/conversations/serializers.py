@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
+from documents.models import Document
+
 from .models import Conversation, ConversationMessage
 
 
@@ -11,8 +13,14 @@ class ConversationMessageSerializer(serializers.ModelSerializer):
         fields = ('id', 'sender', 'content', 'metadata', 'created_at')
         read_only_fields = ('id', 'created_at')
 
+    def validate_sender(self, value):
+        if value != ConversationMessage.Sender.USER:
+            raise serializers.ValidationError('Only user messages can be created through this endpoint.')
+        return value
+
 
 class ConversationSerializer(serializers.ModelSerializer):
+    document = serializers.PrimaryKeyRelatedField(queryset=Document.objects.all(), required=False, allow_null=True)
     document_title = serializers.CharField(source='document.title', read_only=True)
     message_count = serializers.SerializerMethodField()
 
@@ -37,5 +45,10 @@ class ConversationSerializer(serializers.ModelSerializer):
         request = self.context['request']
         return Conversation.objects.create(owner=request.user, **validated_data)
 
+    def validate_document(self, value):
+        if value is not None and value.owner_id != self.context['request'].user.id:
+            raise serializers.ValidationError('You can only attach your own documents.')
+        return value
+
     def get_message_count(self, instance):
-        return instance.messages.count()
+        return getattr(instance, 'message_count', instance.messages.count())

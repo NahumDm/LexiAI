@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import tempfile
+
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import Document
+from .models import Document, DocumentIngestionJob
 
 User = get_user_model()
 
@@ -51,3 +55,77 @@ class DocumentApiTests(APITestCase):
 		)
 		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 		self.assertIn('source_file_url', response.data)
+
+
+class DocumentIngestCommandTests(APITestCase):
+	def setUp(self):
+		self.staff_user = User.objects.create_user(email='staff@example.com', password='password123', is_staff=True)
+
+	def test_ingest_command_imports_text_documents(self):
+		with tempfile.TemporaryDirectory() as temp_dir:
+			source_file = f'{temp_dir}/tax_notice.txt'
+			with open(source_file, 'w', encoding='utf-8') as handle:
+				handle.write('Imported tax notice content')
+
+			call_command('ingest_tax_docs', source_dir=temp_dir, owner_email=self.staff_user.email)
+
+		document = Document.objects.get(owner=self.staff_user, title='Tax Notice')
+		self.assertEqual(document.extracted_text, 'Imported tax notice content')
+		self.assertEqual(document.status, Document.Status.READY)
+
+
+@override_settings(CELERY_TASK_ALWAYS_EAGER=True, CELERY_TASK_EAGER_PROPAGATES=True)
+class DocumentIngestionJobApiTests(APITestCase):
+	def setUp(self):
+		self.admin_user = User.objects.create_user(
+			email='admin@example.com',
+			password='password123',
+			is_staff=True,
+			is_superuser=True,
+		)
+		self.owner_user = User.objects.create_user(email='owner@example.com', password='password123', is_staff=True)
+		self.regular_user = User.objects.create_user(email='regular@example.com', password='password123')
+
+	def test_admin_can_trigger_ingestion_and_view_progress(self):
+		self.client.force_authenticate(user=self.admin_user)
+		with tempfile.TemporaryDirectory() as temp_dir:
+			source_file = f'{temp_dir}/tax_notice.txt'
+			with open(source_file, 'w', encoding='utf-8') as handle:
+				handle.write('API import content')
+
+			response = self.client.post(
+				'/api/v1/documents/admin/ingestions/',
+				{
+					'source_dir': temp_dir,
+					'owner_email': self.owner_user.email,
+				},
+				format='json',
+			)
+
+		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+		self.assertEqual(response.data['status'], DocumentIngestionJob.Status.SUCCEEDED)
+		self.assertEqual(response.data['total_files'], 1)
+		self.assertEqual(response.data['processed_files'], 1)
+		self.assertEqual(response.data['progress_percent'], 100.0)
+
+		job = DocumentIngestionJob.objects.get(pk=response.data['id'])
+		self.assertEqual(job.status, DocumentIngestionJob.Status.SUCCEEDED)
+
+		detail_response = self.client.get(f"/api/v1/documents/admin/ingestions/{job.pk}/")
+		self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+		self.assertEqual(detail_response.data['processed_files'], 1)
+
+		document = Document.objects.get(owner=self.owner_user, title='Tax Notice')
+		self.assertEqual(document.extracted_text, 'API import content')
+
+	def test_non_admin_cannot_trigger_ingestion(self):
+		self.client.force_authenticate(user=self.regular_user)
+		response = self.client.post(
+			'/api/v1/documents/admin/ingestions/',
+			{
+				'source_dir': 'tax_doc',
+				'owner_email': self.owner_user.email,
+			},
+			format='json',
+		)
+		self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)

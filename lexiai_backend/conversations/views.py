@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from django.shortcuts import get_object_or_404
+from django.db.models import Count
 from rest_framework import generics, permissions
 
 from .models import Conversation, ConversationMessage
@@ -9,7 +10,11 @@ from .serializers import ConversationMessageSerializer, ConversationSerializer
 
 class ConversationQuerysetMixin:
     def get_queryset(self):
-        return Conversation.objects.filter(owner=self.request.user).select_related('document')
+        return (
+            Conversation.objects.filter(owner=self.request.user)
+            .select_related('document')
+            .annotate(message_count=Count('messages'))
+        )
 
 
 class ConversationListCreateView(ConversationQuerysetMixin, generics.ListCreateAPIView):
@@ -30,7 +35,7 @@ class ConversationMessageListCreateView(generics.ListCreateAPIView):
         return get_object_or_404(Conversation, pk=self.kwargs['conversation_pk'], owner=self.request.user)
 
     def get_queryset(self):
-        return self.get_conversation().messages.all()
+        return self.get_conversation().messages.select_related('conversation').all()
 
     def perform_create(self, serializer):
         serializer.save(conversation=self.get_conversation())
