@@ -5,18 +5,28 @@ from rest_framework import serializers
 from documents.models import Document
 
 from .models import Conversation, ConversationMessage
+from .services import create_conversation_message
 
 
 class ConversationMessageSerializer(serializers.ModelSerializer):
     class Meta:
         model = ConversationMessage
         fields = ('id', 'sender', 'content', 'metadata', 'created_at')
-        read_only_fields = ('id', 'created_at')
+        read_only_fields = ('id', 'sender', 'created_at')
 
-    def validate_sender(self, value):
-        if value != ConversationMessage.Sender.USER:
-            raise serializers.ValidationError('Only user messages can be created through this endpoint.')
-        return value
+    def validate(self, attrs):
+        sender = self.initial_data.get('sender')
+        if sender not in (None, '', ConversationMessage.Sender.USER):
+            raise serializers.ValidationError({'sender': 'Only user messages can be created through this endpoint.'})
+        return attrs
+
+    def create(self, validated_data):
+        conversation = validated_data.pop('conversation')
+        return create_conversation_message(
+            conversation=conversation,
+            content=validated_data['content'],
+            metadata=validated_data.get('metadata', {}),
+        )
 
 
 class ConversationSerializer(serializers.ModelSerializer):

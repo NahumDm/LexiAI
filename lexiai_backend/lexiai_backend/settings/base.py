@@ -96,6 +96,7 @@ INSTALLED_APPS = [
     'documents.apps.DocumentsConfig',
     'feedback.apps.FeedbackConfig',
     'core.apps.CoreConfig',
+    'ai_engine.apps.AiEngineConfig',
 ]
 
 MIDDLEWARE = [

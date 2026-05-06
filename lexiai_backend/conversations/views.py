@@ -1,20 +1,17 @@
 from __future__ import annotations
 
 from django.shortcuts import get_object_or_404
-from django.db.models import Count
 from rest_framework import generics, permissions
 
 from .models import Conversation, ConversationMessage
+from .permissions import IsConversationOwner
+from .selectors import get_conversation_messages, get_user_conversations
 from .serializers import ConversationMessageSerializer, ConversationSerializer
 
 
 class ConversationQuerysetMixin:
     def get_queryset(self):
-        return (
-            Conversation.objects.filter(owner=self.request.user)
-            .select_related('document')
-            .annotate(message_count=Count('messages'))
-        )
+        return get_user_conversations(self.request.user)
 
 
 class ConversationListCreateView(ConversationQuerysetMixin, generics.ListCreateAPIView):
@@ -24,18 +21,25 @@ class ConversationListCreateView(ConversationQuerysetMixin, generics.ListCreateA
 
 class ConversationDetailView(ConversationQuerysetMixin, generics.RetrieveUpdateDestroyAPIView):
     serializer_class = ConversationSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsConversationOwner]
+
+    def get_object(self):
+        conversation = get_object_or_404(Conversation.objects.select_related('document'), pk=self.kwargs['pk'])
+        self.check_object_permissions(self.request, conversation)
+        return conversation
 
 
 class ConversationMessageListCreateView(generics.ListCreateAPIView):
     serializer_class = ConversationMessageSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsConversationOwner]
 
     def get_conversation(self):
-        return get_object_or_404(Conversation, pk=self.kwargs['conversation_pk'], owner=self.request.user)
+        conversation = get_object_or_404(Conversation, pk=self.kwargs['conversation_pk'])
+        self.check_object_permissions(self.request, conversation)
+        return conversation
 
     def get_queryset(self):
-        return self.get_conversation().messages.select_related('conversation').all()
+        return get_conversation_messages(self.get_conversation())
 
     def perform_create(self, serializer):
         serializer.save(conversation=self.get_conversation())

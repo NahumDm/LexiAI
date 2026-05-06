@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from django.db import transaction
 from rest_framework import generics, permissions
 
 from .models import Document
+from .models import DocumentIngestionJob
 from .serializers import DocumentIngestionJobSerializer, DocumentSerializer
 from .tasks import process_tax_document_ingestion_job
-from .models import DocumentIngestionJob
+from ai_engine.tasks import embed_document_chunks
 
 
 class DocumentQuerysetMixin:
@@ -16,6 +18,10 @@ class DocumentQuerysetMixin:
 class DocumentListCreateView(DocumentQuerysetMixin, generics.ListCreateAPIView):
     serializer_class = DocumentSerializer
     permission_classes = [permissions.IsAuthenticated]
+
+    def perform_create(self, serializer):
+        document = serializer.save()
+        transaction.on_commit(lambda: embed_document_chunks.delay(document.pk))
 
 
 class DocumentDetailView(DocumentQuerysetMixin, generics.RetrieveUpdateDestroyAPIView):
@@ -32,7 +38,7 @@ class AdminDocumentIngestionJobListCreateView(generics.ListCreateAPIView):
 
     def perform_create(self, serializer):
         job = serializer.save()
-        process_tax_document_ingestion_job.delay(job.pk)
+        transaction.on_commit(lambda: process_tax_document_ingestion_job.delay(job.pk))
         job.refresh_from_db()
 
 

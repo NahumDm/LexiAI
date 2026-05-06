@@ -10,3 +10,46 @@ __pycache__/
 .ruff_cache/
 media/
 staticfiles/
+
+# Environment / secrets
+.env
+.env.*
+*.env
+
+# Python virtualenvs
+venv/
+ENV/
+.venv/
+/.venv
+
+# IDE / Editor
+.vscode/
+.idea/
+*.sublime-workspace
+
+# Keys, credentials
+*.pem
+*.key
+secrets.yml
+credentials.json
+
+# Docker
+docker-compose.override.yml
+docker-compose.*.yml
+
+# Database
+*.sqlite3
+*.db
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+dist/
+build/
+__pycache__/

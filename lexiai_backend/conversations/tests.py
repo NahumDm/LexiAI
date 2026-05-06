@@ -62,12 +62,14 @@ class ConversationApiTests(APITestCase):
 		response = self.client.post(
 			f'/api/v1/conversations/{conversation.id}/messages/',
 			{
-				'sender': ConversationMessage.Sender.USER,
 				'content': 'What should I review first?',
 			},
 			format='json',
 		)
 		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+		self.assertEqual(response.data['sender'], ConversationMessage.Sender.USER)
+		conversation.refresh_from_db()
+		self.assertIsNotNone(conversation.last_message_at)
 
 		response = self.client.get(f'/api/v1/conversations/{conversation.id}/messages/')
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -84,6 +86,21 @@ class ConversationApiTests(APITestCase):
 			format='json',
 		)
 		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+	def test_owner_can_update_own_conversation(self):
+		conversation = Conversation.objects.create(owner=self.user, title='Advice')
+		response = self.client.patch(
+			f'/api/v1/conversations/{conversation.id}/',
+			{
+				'title': 'Updated Advice',
+				'status': Conversation.Status.CLOSED,
+			},
+			format='json',
+		)
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		conversation.refresh_from_db()
+		self.assertEqual(conversation.title, 'Updated Advice')
+		self.assertEqual(conversation.status, Conversation.Status.CLOSED)
 
 	def test_cannot_post_message_to_other_users_conversation(self):
 		conversation = Conversation.objects.create(owner=self.other_user, title='Advice')

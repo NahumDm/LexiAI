@@ -4,7 +4,7 @@ from django.core.management.base import CommandError
 from rest_framework import serializers
 
 from .models import Document, DocumentIngestionJob
-from .services import resolve_ingestion_owner
+from .services import resolve_ingestion_owner, resolve_ingestion_source
 
 
 class DocumentSerializer(serializers.ModelSerializer):
@@ -87,6 +87,13 @@ class DocumentIngestionJobSerializer(serializers.ModelSerializer):
         if not instance.total_files:
             return 0
         return round((instance.processed_files / instance.total_files) * 100, 2)
+
+    def validate_source_dir(self, value):
+        try:
+            resolve_ingestion_source(value)
+        except CommandError as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+        return value
 
     def create(self, validated_data):
         owner_email = validated_data.pop('owner_email', None)
