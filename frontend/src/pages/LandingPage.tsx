@@ -1,0 +1,76 @@
+import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { Header } from '@/components/layout/Header';
+import { HeroSection } from '@/components/landing/HeroSection';
+import { FeaturesSection } from '@/components/landing/FeaturesSection';
+import { TargetUsersSection } from '@/components/landing/TargetUsersSection';
+import { Footer } from '@/components/landing/Footer';
+import { LoginModal } from '@/components/auth/LoginModal';
+import { RegisterModal } from '@/components/auth/RegisterModal';
+import { useAuth } from '@/contexts/AuthContext';
+
+export default function LandingPage() {
+  const navigate = useNavigate();
+  const { continueAsGuest, user } = useAuth();
+  const [showLogin, setShowLogin] = useState(false);
+  const [showRegister, setShowRegister] = useState(false);
+
+  // If user is already logged in, redirect to appropriate page
+  React.useEffect(() => {
+    if (user) {
+      if (user.role === 'admin') {
+        navigate('/admin');
+      } else {
+        navigate('/chat');
+      }
+    }
+  }, [user, navigate]);
+
+  const handleGuestClick = () => {
+    continueAsGuest();
+    navigate('/chat');
+  };
+
+  return (
+    <div className="min-h-screen bg-background">
+      {/* Header overlays the hero */}
+      <div className="absolute top-0 left-0 right-0 z-50">
+        <Header 
+          onLoginClick={() => setShowLogin(true)}
+          onRegisterClick={() => setShowRegister(true)}
+          variant="landing"
+        />
+      </div>
+
+      <HeroSection
+        onLoginClick={() => setShowLogin(true)}
+        onRegisterClick={() => setShowRegister(true)}
+        onGuestClick={handleGuestClick}
+      />
+
+      <FeaturesSection />
+
+      <TargetUsersSection />
+
+      <Footer />
+
+      {/* Auth Modals */}
+      <LoginModal
+        open={showLogin}
+        onOpenChange={setShowLogin}
+        onSwitchToRegister={() => {
+          setShowLogin(false);
+          setShowRegister(true);
+        }}
+      />
+      <RegisterModal
+        open={showRegister}
+        onOpenChange={setShowRegister}
+        onSwitchToLogin={() => {
+          setShowRegister(false);
+          setShowLogin(true);
+        }}
+      />
+    </div>
+  );
+}

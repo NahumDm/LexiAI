@@ -21,7 +21,9 @@ class ConversationMessageSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
-        conversation = validated_data.pop('conversation')
+        conversation = validated_data.pop('conversation', None)
+        if conversation is None:
+            raise serializers.ValidationError({'conversation': 'Conversation is required.'})
         return create_conversation_message(
             conversation=conversation,
             content=validated_data['content'],

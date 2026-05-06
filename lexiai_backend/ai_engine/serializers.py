@@ -30,5 +30,9 @@ class QueryFeedbackSerializer(serializers.ModelSerializer):
 		read_only_fields = ('id', 'created_at')
 
 	def create(self, validated_data):
-		validated_data['user'] = self.context['request'].user
+		request = self.context.get('request')
+		user = getattr(request, 'user', None)
+		if user is None or not getattr(user, 'is_authenticated', False):
+			raise serializers.ValidationError('Authenticated user required to submit feedback')
+		validated_data['user'] = user
 		return super().create(validated_data)

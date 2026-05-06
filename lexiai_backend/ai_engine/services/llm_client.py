@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -78,9 +79,11 @@ class StubLLMClient(LLMClient):
 
 		for idx, retrieved in enumerate(context_chunks, start=1):
 			chunk = retrieved.chunk
+			# Guard access to optional document relation
+			document_title = getattr(chunk.document, 'title', None) if getattr(chunk, 'document', None) else None
 			sources.append({
 				'chunk_id': chunk.id,
-				'document_title': chunk.document.title,
+				'document_title': document_title,
 				'relevance': round(retrieved.relevance_score, 3),
 				'excerpt': chunk.content[:200],
 			})
@@ -116,6 +119,8 @@ class MistralLLMClient(LLMClient):
 		self.temperature = temperature
 		self.model = 'mistral-7b-instruct'
 		self.client = None
+		self.timeout = 30
+		self._init_lock = threading.RLock()
 
 	def _initialize(self):
 		try:
@@ -137,8 +142,11 @@ class MistralLLMClient(LLMClient):
 		context_chunks: list[RetrievedChunk],
 	) -> ChatResponse:
 		"""Generate response using Mistral 7B Instruct."""
+		# Double-checked locking to avoid race in concurrent initialization
 		if not self.client:
-			self._initialize()
+			with self._init_lock:
+				if not self.client:
+					self._initialize()
 
 		warnings = []
 		sources = []
@@ -161,9 +169,11 @@ class MistralLLMClient(LLMClient):
 
 		for retrieved in context_chunks:
 			chunk = retrieved.chunk
+			# Guard document access
+			document_title = getattr(chunk.document, 'title', None) if getattr(chunk, 'document', None) else None
 			sources.append({
 				'chunk_id': chunk.id,
-				'document_title': chunk.document.title,
+				'document_title': document_title,
 				'relevance': round(retrieved.relevance_score, 3),
 				'excerpt': chunk.content[:150],
 			})
@@ -194,21 +204,46 @@ class MistralLLMClient(LLMClient):
 					{'role': 'system', 'content': system_prompt},
 					{'role': 'user', 'content': user_prompt},
 				],
+				timeout=self.timeout,
 			)
 
 			answer = response.choices[0].message.content
-			
+
 			if avg_confidence < CONFIDENCE_THRESHOLD and '[Source' not in answer:
 				warnings.append('Answer provided but confidence is low. Verify against source documents.')
+
+			# Normalize tokens_used into expected contract
+			usage = getattr(response, 'usage', None) or {}
+			if hasattr(usage, 'to_dict'):
+				usage_data = usage.to_dict()
+			elif hasattr(usage, 'dict'):
+				usage_data = usage.dict()
+			elif isinstance(usage, dict):
+				usage_data = usage
+			else:
+				# Fallback: try attribute access
+				usage_data = {
+					'prompt_tokens': getattr(usage, 'prompt_tokens', 0),
+					'completion_tokens': getattr(usage, 'completion_tokens', 0),
+					'total_tokens': getattr(usage, 'total_tokens', 0),
+				}
+
+			tokens_used = {
+				'prompt': int(usage_data.get('prompt_tokens', 0)),
+				'completion': int(usage_data.get('completion_tokens', 0)),
+				'total': int(usage_data.get('total_tokens', usage_data.get('prompt_tokens', 0) + usage_data.get('completion_tokens', 0)))
+			}
 
 			return ChatResponse(
 				answer=answer,
 				sources=sources,
 				model_used='mistral-7b',
-				tokens_used=getattr(response.usage, '__dict__', {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0}),
+				tokens_used=tokens_used,
 				retrieval_confidence=avg_confidence,
 				warnings=warnings,
 			)
 		except Exception as exc:
+			# Handle common timeout/network errors explicitly if available
 			logger.exception(f'Mistral API error: {exc}')
+			# Reraise to be handled by caller
 			raise

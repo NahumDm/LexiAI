@@ -71,7 +71,7 @@ class ChatAskView(generics.CreateAPIView):
 		except Exception as exc:
 			logger.exception(f'RAG pipeline failed: {exc}')
 			return Response(
-				{'detail': f'Failed to process query: {str(exc)}'},
+				{'detail': 'An internal error occurred while processing the request.'},
 				status=status.HTTP_500_INTERNAL_SERVER_ERROR,
 			)
 
@@ -99,7 +99,11 @@ class ChatAskView(generics.CreateAPIView):
 			conversation.last_message_at = assistant_message.created_at
 			conversation.save(update_fields=['last_message_at'])
 		except Exception as exc:
-			logger.warning(f'Failed to save messages to conversation: {exc}')
+			logger.exception(f'Failed to save messages to conversation: {exc}')
+			# Propagate failure to response warnings so callers are aware
+			if hasattr(chat_response, 'warnings'):
+				chat_response.warnings.append('Failed to persist messages to conversation history')
+			# Do not update conversation.last_message_at when save failed
 
 		response_serializer = ChatResponseSerializer(data={
 			'answer': chat_response.answer,
@@ -134,10 +138,8 @@ class ChatFeedbackView(generics.CreateAPIView):
 				self.permission_denied(self.request, 'You can only provide feedback on your own queries')
 			serializer.save(query_log=query_log)
 		except QueryLog.DoesNotExist:
-			return Response(
-				{'detail': 'Query not found'},
-				status=status.HTTP_404_NOT_FOUND,
-			)
+			from django.http import Http404
+			raise Http404('Query not found')
 
 
 @api_view(['GET'])
@@ -147,8 +149,21 @@ def analytics_view(request):
 	Admin analytics endpoint.
 	GET /api/v1/ai/analytics/
 	"""
-	days_back = int(request.query_params.get('days', 7))
-	
+	# Validate 'days' query param
+	_default_days = 7
+	_min_days = 1
+	_max_days = 90
+	days_raw = request.query_params.get('days', None)
+	if days_raw is None:
+		days_back = _default_days
+	else:
+		try:
+			days_back = int(days_raw)
+		except (TypeError, ValueError):
+			return Response({'detail': 'Invalid days parameter'}, status=status.HTTP_400_BAD_REQUEST)
+		# clamp to sensible bounds
+		days_back = max(_min_days, min(_max_days, days_back))
+
 	cutoff_date = timezone.now() - timedelta(days=days_back)
 	recent_logs = QueryLog.objects.filter(created_at__gte=cutoff_date)
 

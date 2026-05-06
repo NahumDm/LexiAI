@@ -45,10 +45,12 @@ Return Answer + Sources
 ### Models
 
 **DocumentChunk**
-- Stores chunked document text with embeddings
-- Fields: document (FK), sequence_index, content, token_count, embedding (bytes)
-- Metadata: JSON for source tracking
-- Indexes: (document, sequence_index), (document_owner)
+Indexes: (document, sequence_index), (document_owner)
+
+Note: the `DocumentChunk` model defines these indexes explicitly in its `Meta.indexes`:
+- `models.Index(fields=['document', 'sequence_index'])`
+- `models.Index(fields=['document_owner'])`
+Use these exact field names or the explicit index name when referencing indexes in migrations or SQL.
 
 **QueryLog**
 - Tracks analytics: user, conversation, query, response, latency, tokens
@@ -65,9 +67,24 @@ When a document is uploaded:
 class DocumentListCreateView:
     def perform_create(self, serializer):
         document = serializer.save()
-        transaction.on_commit(lambda: embed_document_chunks.delay(document.pk))
-```
+# Use direct DB similarity search (pgvector)
+# For nearest-neighbor queries prefer ordering by a computed distance or annotating with a distance
+from django.db.models import F, Func, FloatField
 
+# Option A: order by the cosine distance using a VectorField expression (if supported):
+# DocumentChunk.objects.order_by(F('embedding').cosine_distance(query_embedding))[:5]
+
+# Option B: annotate with a computed distance and then order (portable SQL approach):
+# This uses the database cosine_distance function and returns a `distance` float you can sort by.
+# Replace `cosine_distance` with the exact SQL function available in your pgvector setup.
+#
+# from django.db.models import Func, F, FloatField, Value
+# DocumentChunk.objects.annotate(
+#     distance=Func(F('embedding'), Value(query_embedding), function='cosine_distance', output_field=FloatField())
+# ).order_by('distance')[:5]
+
+# The key point: don't attempt to use `filter(embedding__cosine_distance=...)` for nearest-neighbor
+# ranking — instead annotate or order_by a computed distance and then slice the top-k results.
 The `embed_document_chunks` Celery task runs asynchronously:
 
 ```python

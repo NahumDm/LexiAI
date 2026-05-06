@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 from ai_engine.models import QueryLog
 from ai_engine.services.embedding import EmbeddingService
-from ai_engine.services.llm_client import ChatResponse, StubLLMClient
+from ai_engine.services.llm_client import ChatResponse, StubLLMClient, LLMClient
 from ai_engine.services.retrieval import RetrievalService
 from django.utils import timezone
 
@@ -18,10 +18,10 @@ logger = logging.getLogger(__name__)
 class RAGPipeline:
     """
     Orchestrates the full RAG (Retrieval-Augmented Generation) flow.
-    Handles: query embeding -> retrieval -> LLM generation -> response.
+    Handles: query embedding -> retrieval -> LLM generation -> response.
     """
 
-    def __init__(self, llm_client=None):
+    def __init__(self, llm_client: LLMClient | None = None):
         self.llm_client = llm_client or StubLLMClient()
 
     def process_query(

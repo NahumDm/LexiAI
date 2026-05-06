@@ -20,11 +20,13 @@ class ChunkingService:
 	def estimate_tokens(text: str) -> int:
 		"""
 		Rough token count estimate using word count.
-		Approximation: 1 token ≈ 1.3 words (conservative).
+		Approximation: ~1.3 tokens per word (conservative).
 		For production, use tiktoken or the LLM's tokenizer.
 		"""
 		words = len(text.split())
-		return max(1, int(words / 1.3))
+		# Multiply words by tokens-per-word estimate to avoid undercounting
+		tokens = int(words * 1.3)
+		return max(1, tokens)
 
 	@staticmethod
 	def split_by_sentences(text: str) -> list[str]:
@@ -59,6 +61,52 @@ class ChunkingService:
 		for sentence in sentences:
 			sentence_tokens = cls.estimate_tokens(sentence)
 
+			# Handle an oversized single sentence (longer than max_size)
+			if sentence_tokens > max_size:
+				# Flush any current chunk first
+				if current_chunk:
+					chunk_text = ' '.join(current_chunk)
+					chunks.append({
+						'content': chunk_text,
+						'token_count': current_tokens,
+						'sequence_index': sequence_index,
+					})
+					sequence_index += 1
+					current_chunk = []
+					current_tokens = 0
+
+				# Split the oversized sentence into smaller word-based segments
+				words = sentence.split()
+				segment = []
+				seg_tokens = 0
+				for w in words:
+					segment.append(w)
+					seg_tokens = cls.estimate_tokens(' '.join(segment))
+					if seg_tokens >= max_size:
+						# Emit segment (may equal or slightly exceed max due to estimate)
+						chunks.append({
+							'content': ' '.join(segment),
+							'token_count': seg_tokens,
+							'sequence_index': sequence_index,
+						})
+						sequence_index += 1
+						segment = []
+						seg_tokens = 0
+				# flush remaining segment
+				if segment:
+					seg_text = ' '.join(segment)
+					chunks.append({
+						'content': seg_text,
+						'token_count': cls.estimate_tokens(seg_text),
+						'sequence_index': sequence_index,
+					})
+				sequence_index += 1
+				# reset current chunk state
+				current_chunk = []
+				current_tokens = 0
+				continue
+
+			# Normal processing for sentences that fit
 			if current_tokens + sentence_tokens > max_size and current_chunk:
 				chunk_text = ' '.join(current_chunk)
 				chunks.append({

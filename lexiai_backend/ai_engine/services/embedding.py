@@ -40,8 +40,10 @@ class EmbeddingService:
 		return embedding
 
 	@classmethod
-	def generate_embeddings_batch(cls, texts: list[str]) -> list[np.ndarray]:
-		"""Generate embeddings for multiple texts."""
+	def generate_embeddings_batch(cls, texts: list[str]) -> np.ndarray:
+		"""Generate embeddings for multiple texts.
+		Returns a 2D numpy array with shape (n_texts, dim).
+		"""
 		model = cls.get_model()
 		embeddings = model.encode(texts, convert_to_tensor=False)
 		return embeddings
@@ -58,5 +60,11 @@ class EmbeddingService:
 
 	@classmethod
 	def cosine_similarity(cls, vec1: np.ndarray, vec2: np.ndarray) -> float:
-		"""Compute cosine similarity between two embeddings."""
-		return float(np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2)))
+		"""Compute cosine similarity between two embeddings with zero-norm guards.
+		Returns 0.0 if either vector has near-zero norm.
+		"""
+		norm1 = float(np.linalg.norm(vec1))
+		norm2 = float(np.linalg.norm(vec2))
+		if norm1 == 0.0 or norm2 == 0.0:
+			return 0.0
+		return float(np.dot(vec1, vec2) / (norm1 * norm2))

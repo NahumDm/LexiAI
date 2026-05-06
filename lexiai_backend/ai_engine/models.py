@@ -70,9 +70,8 @@ class QueryLog(models.Model):
 	def __str__(self) -> str:
 		return f'Query by {self.user.email} at {self.created_at}'
 
-
-@property
-def average_confidence(self) -> float:
+	@property
+	def average_confidence(self) -> float:
 		"""Get average confidence of this query's retrieval."""
 		return self.retrieval_confidence
 

@@ -1,0 +1,220 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Merriweather:wght@300;400;700&family=Inter:wght@300;400;500;600;700&display=swap');
+
+@layer base {
+  :root {
+    /* LexiTax AI Design System - Professional Legal Theme */
+    
+    /* Primary - Deep Navy (Trust & Authority) */
+    --primary: 213 50% 23%;
+    --primary-foreground: 0 0% 100%;
+    
+    /* Secondary - Warm Gold (Academic Prestige) */
+    --secondary: 38 70% 50%;
+    --secondary-foreground: 213 50% 15%;
+    
+    /* Background & Surfaces */
+    --background: 210 20% 98%;
+    --foreground: 213 50% 15%;
+    
+    --card: 0 0% 100%;
+    --card-foreground: 213 50% 15%;
+    
+    --popover: 0 0% 100%;
+    --popover-foreground: 213 50% 15%;
+    
+    /* Muted & Subtle Elements */
+    --muted: 210 20% 94%;
+    --muted-foreground: 213 20% 45%;
+    
+    /* Accent - Lighter Navy */
+    --accent: 213 40% 92%;
+    --accent-foreground: 213 50% 23%;
+    
+    /* Semantic Colors */
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    
+    --success: 142 71% 45%;
+    --success-foreground: 0 0% 100%;
+    
+    --warning: 38 92% 50%;
+    --warning-foreground: 213 50% 15%;
+    
+    /* Borders & Inputs */
+    --border: 213 20% 88%;
+    --input: 213 20% 88%;
+    --ring: 213 50% 40%;
+    
+    --radius: 0.5rem;
+    
+    /* Chat-specific */
+    --chat-user: 213 50% 23%;
+    --chat-user-foreground: 0 0% 100%;
+    --chat-ai: 210 20% 96%;
+    --chat-ai-foreground: 213 50% 15%;
+    
+    /* Citation highlights */
+    --citation: 38 70% 50%;
+    --citation-bg: 38 70% 95%;
+    
+    /* Sidebar */
+    --sidebar-background: 213 50% 18%;
+    --sidebar-foreground: 210 20% 90%;
+    --sidebar-primary: 38 70% 50%;
+    --sidebar-primary-foreground: 213 50% 15%;
+    --sidebar-accent: 213 40% 25%;
+    --sidebar-accent-foreground: 210 20% 90%;
+    --sidebar-border: 213 40% 28%;
+    --sidebar-ring: 38 70% 50%;
+  }
+
+  .dark {
+    --primary: 38 70% 55%;
+    --primary-foreground: 213 50% 10%;
+    
+    --secondary: 213 50% 30%;
+    --secondary-foreground: 210 20% 95%;
+    
+    --background: 213 50% 8%;
+    --foreground: 210 20% 95%;
+    
+    --card: 213 50% 12%;
+    --card-foreground: 210 20% 95%;
+    
+    --popover: 213 50% 12%;
+    --popover-foreground: 210 20% 95%;
+    
+    --muted: 213 40% 18%;
+    --muted-foreground: 210 15% 60%;
+    
+    --accent: 213 40% 22%;
+    --accent-foreground: 210 20% 95%;
+    
+    --destructive: 0 62% 45%;
+    --destructive-foreground: 0 0% 100%;
+    
+    --border: 213 40% 22%;
+    --input: 213 40% 22%;
+    --ring: 38 70% 55%;
+    
+    --chat-user: 38 70% 50%;
+    --chat-user-foreground: 213 50% 10%;
+    --chat-ai: 213 50% 15%;
+    --chat-ai-foreground: 210 20% 95%;
+    
+    --sidebar-background: 213 50% 6%;
+    --sidebar-foreground: 210 20% 90%;
+    --sidebar-primary: 38 70% 55%;
+    --sidebar-primary-foreground: 213 50% 10%;
+    --sidebar-accent: 213 40% 15%;
+    --sidebar-accent-foreground: 210 20% 90%;
+    --sidebar-border: 213 40% 18%;
+    --sidebar-ring: 38 70% 55%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-serif;
+  }
+}
+
+@layer components {
+  .glass-panel {
+    @apply bg-card/80 backdrop-blur-sm border border-border/50 shadow-lg;
+  }
+  
+  .citation-badge {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-citation-bg text-secondary border border-secondary/20;
+  }
+  
+  .confidence-indicator {
+    @apply inline-flex items-center gap-1.5 text-xs text-muted-foreground;
+  }
+  
+  .chat-bubble {
+    @apply rounded-2xl px-4 py-3 max-w-[85%];
+  }
+  
+  .chat-bubble-user {
+    @apply bg-chat-user text-chat-user-foreground ml-auto rounded-br-md;
+  }
+  
+  .chat-bubble-ai {
+    @apply bg-chat-ai text-chat-ai-foreground mr-auto rounded-bl-md;
+  }
+  
+  .legal-card {
+    @apply bg-card rounded-xl border border-border p-6 shadow-sm hover:shadow-md transition-shadow duration-200;
+  }
+  
+  .stat-card {
+    @apply bg-card rounded-xl border border-border p-5 shadow-sm;
+  }
+  
+  .nav-link-active {
+    @apply bg-accent text-accent-foreground;
+  }
+  
+  .gradient-text {
+    @apply bg-gradient-to-r from-primary to-secondary bg-clip-text text-transparent;
+  }
+  
+  .hero-gradient {
+    background: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(213 50% 30%) 50%, hsl(var(--secondary) / 0.8) 100%);
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+  
+  .animate-fade-in {
+    animation: fadeIn 0.5s ease-out;
+  }
+  
+  .animate-slide-up {
+    animation: slideUp 0.5s ease-out;
+  }
+  
+  .animate-slide-in-left {
+    animation: slideInLeft 0.3s ease-out;
+  }
+  
+  .animate-pulse-subtle {
+    animation: pulseSubtle 2s ease-in-out infinite;
+  }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideInLeft {
+  from { opacity: 0; transform: translateX(-20px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes pulseSubtle {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}

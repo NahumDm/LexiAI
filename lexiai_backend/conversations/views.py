@@ -34,8 +34,11 @@ class ConversationMessageListCreateView(generics.ListCreateAPIView):
     permission_classes = [permissions.IsAuthenticated, IsConversationOwner]
 
     def get_conversation(self):
+        if hasattr(self, '_conversation') and getattr(self, '_conversation') is not None:
+            return self._conversation
         conversation = get_object_or_404(Conversation, pk=self.kwargs['conversation_pk'])
         self.check_object_permissions(self.request, conversation)
+        self._conversation = conversation
         return conversation
 
     def get_queryset(self):
