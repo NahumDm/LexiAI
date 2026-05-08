@@ -19,13 +19,14 @@ services:
     build:
       context: ..
       dockerfile: lexiai_backend/Dockerfile
+    working_dir: /app/lexiai_backend
     command: >
       sh -c "python manage.py migrate --noinput &&
       gunicorn lexiai_backend.wsgi:application --bind 0.0.0.0:8000 --workers 3"
     env_file:
       - .env
     environment:
-      DJANGO_SETTINGS_MODULE: lexiai_backend.settings.prod
+      DJANGO_SETTINGS_MODULE: lexiai_backend.settings.dev
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-lexiai_db}
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -42,11 +43,12 @@ services:
     build:
       context: ..
       dockerfile: lexiai_backend/Dockerfile
-    command: celery -A lexiai_backend worker -l info
+    working_dir: /app/lexiai_backend
+    command: celery -A lexiai_backend.celery worker -l info
     env_file:
       - .env
     environment:
-      DJANGO_SETTINGS_MODULE: lexiai_backend.settings.prod
+      DJANGO_SETTINGS_MODULE: lexiai_backend.settings.dev
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-lexiai_db}
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -61,11 +63,12 @@ services:
     build:
       context: ..
       dockerfile: lexiai_backend/Dockerfile
-    command: celery -A lexiai_backend beat -l info
+    working_dir: /app/lexiai_backend
+    command: celery -A lexiai_backend.celery beat -l info
     env_file:
       - .env
     environment:
-      DJANGO_SETTINGS_MODULE: lexiai_backend.settings.prod
+      DJANGO_SETTINGS_MODULE: lexiai_backend.settings.dev
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-lexiai_db}
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0

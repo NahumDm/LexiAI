@@ -58,12 +58,32 @@ export interface QueryFeedback {
   created_at?: string;
 }
 
+interface PaginatedResponse<T> {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: T[];
+}
+
+const unwrapListResponse = <T>(payload: T[] | PaginatedResponse<T> | null | undefined): T[] => {
+  if (!payload) return [];
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray((payload as PaginatedResponse<T>).results)) {
+    return (payload as PaginatedResponse<T>).results;
+  }
+  return [];
+};
+
 export class ChatAPI {
   /**
    * Get all conversations for current user
    */
   static async getConversations(): Promise<ApiResponse<Conversation[]>> {
-    return apiClient.get<Conversation[]>('/conversations/');
+    const response = await apiClient.get<Conversation[] | PaginatedResponse<Conversation>>('/conversations/');
+    return {
+      ...response,
+      data: unwrapListResponse(response.data),
+    };
   }
 
   /**
@@ -107,9 +127,13 @@ export class ChatAPI {
     conversationId: number,
     limit = 50
   ): Promise<ApiResponse<ConversationMessage[]>> {
-    return apiClient.get<ConversationMessage[]>(
+    const response = await apiClient.get<ConversationMessage[] | PaginatedResponse<ConversationMessage>>(
       `/conversations/${conversationId}/messages/?limit=${limit}`
     );
+    return {
+      ...response,
+      data: unwrapListResponse(response.data),
+    };
   }
 
   /**

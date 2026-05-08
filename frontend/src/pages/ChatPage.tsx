@@ -28,7 +28,7 @@ import { ChatAPI } from '@/lib/api/chat';
 
 export default function ChatPage() {
 	const navigate = useNavigate();
-	const { user } = useAuth();
+	const { user, isGuest, guestQueriesRemaining, consumeGuestQuery } = useAuth();
 	const {
 		currentConversation,
 		messages,
@@ -40,6 +40,7 @@ export default function ChatPage() {
 		loadConversation,
 		deleteConversation,
 		sendQuery,
+		addMessage,
 		clearMessages,
 	} = useChat();
 
@@ -65,10 +66,13 @@ export default function ChatPage() {
 			}
 		};
 
-		if (user) {
+		if (user && !isGuest) {
 			loadConversations();
+		} else if (isGuest) {
+			setLocalConversations([]);
+			setIsLoadingConversations(false);
 		}
-	}, [user]);
+	}, [user, isGuest]);
 
 	// Auto-scroll to bottom on new messages
 	useEffect(() => {
@@ -109,6 +113,22 @@ export default function ChatPage() {
 	};
 
 	const handleSendQuery = async (query: string) => {
+		if (isGuest) {
+			if (!consumeGuestQuery()) {
+				return;
+			}
+
+			addMessage(query, 'user');
+			const guestAnswer =
+				'You are in Guest Mode. This is a preview response. Create a free account to get full legal analysis with citations, saved conversations, and document-aware answers.';
+			window.setTimeout(() => {
+				addMessage(guestAnswer, 'assistant', {
+					warnings: ['Guest mode preview response'],
+				});
+			}, 400);
+			return;
+		}
+
 		if (!currentConversation) {
 			// Create new conversation if none exists
 			await handleCreateAndChat(query);
@@ -150,12 +170,8 @@ export default function ChatPage() {
 		}
 	};
 
-	if (!user) {
-		return <div>Redirecting to login...</div>;
-	}
-
 	return (
-		<ProtectedRoute>
+		<ProtectedRoute allowGuest>
 			<div className="flex flex-col h-screen bg-background">
 				<Header />
 
@@ -173,7 +189,9 @@ export default function ChatPage() {
 					{/* Main Chat Area */}
 					<div className="flex-1 flex flex-col">
 						{/* Guest Banner */}
-						{/* Note: Guest functionality would be managed in AuthContext if needed */}
+						{isGuest && (
+							<GuestBanner onLoginClick={() => navigate('/login')} />
+						)}
 
 						{/* Error Alert */}
 						{error && (
@@ -190,7 +208,9 @@ export default function ChatPage() {
 									<div className="text-center py-12">
 										<h2 className="text-2xl font-bold mb-2">Welcome to LexiAI</h2>
 										<p className="text-muted-foreground">
-											Start a new conversation by asking a question about your documents.
+											{isGuest
+												? 'Ask up to 3 questions in guest mode. Sign in to unlock full document-aware chat.'
+												: 'Start a new conversation by asking a question about your documents.'}
 										</p>
 									</div>
 								)}
@@ -217,11 +237,15 @@ export default function ChatPage() {
 								<ChatInput
 									onSend={handleSendQuery}
 									isLoading={isSendingQuery}
-									disabled={isSendingQuery || isLoading}
+									disabled={isSendingQuery || isLoading || (isGuest && guestQueriesRemaining <= 0)}
 									placeholder={
-										currentConversation
+										isGuest && guestQueriesRemaining <= 0
+											? 'Guest limit reached. Sign in to continue.'
+											: currentConversation
 											? 'Ask a question about the documents...'
-											: 'Start typing to create a new conversation...'
+											: isGuest
+												? 'Ask a legal question (3 free tries)...'
+												: 'Start typing to create a new conversation...'
 									}
 								/>
 							</div>

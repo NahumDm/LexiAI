@@ -13,18 +13,33 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
 import { AuthAPI, type User } from '@/lib/api/auth';
 import { apiClient } from '@/lib/api/client';
-import { useRouter } from 'next/navigation';
+import { useLocation, useNavigate } from 'react-router-dom';
+
+const GUEST_QUERY_LIMIT = 3;
+
+type RegisterInput =
+  | {
+      email: string;
+      password: string;
+      first_name?: string;
+      last_name?: string;
+    }
+  | [name: string, email: string, password: string];
 
 export interface AuthContextType {
   user: User | null;
   isLoading: boolean;
   isAuthenticated: boolean;
+  isGuest: boolean;
   isAdmin: boolean;
+  guestQueriesRemaining: number;
   error: string | null;
-  login: (username: string, password: string) => Promise<void>;
-  register: (email: string, username: string, password: string, password2: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<void>;
+  register: (...args: RegisterInput) => Promise<void>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
+  continueAsGuest: () => void;
+  consumeGuestQuery: () => boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -33,7 +48,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const router = useRouter();
+  const [isGuest, setIsGuest] = useState(false);
+  const [guestQueriesRemaining, setGuestQueriesRemaining] = useState(GUEST_QUERY_LIMIT);
+  const navigate = useNavigate();
+  const location = useLocation();
 
   // Load user from sessionStorage on mount (SSR-safe)
   useEffect(() => {
@@ -41,8 +59,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         // Try to get stored user
         const storedUser = sessionStorage.getItem('user');
+        const storedGuest = sessionStorage.getItem('is_guest');
+        const storedGuestRemaining = sessionStorage.getItem('guest_queries_remaining');
+
+        if (storedGuest === 'true') {
+          setIsGuest(true);
+          setGuestQueriesRemaining(
+            storedGuestRemaining ? Math.max(parseInt(storedGuestRemaining, 10) || 0, 0) : GUEST_QUERY_LIMIT
+          );
+        } else {
+          setIsGuest(false);
+          setGuestQueriesRemaining(GUEST_QUERY_LIMIT);
+        }
+
         if (storedUser) {
-          setUser(JSON.parse(storedUser));
+          try {
+            setUser(JSON.parse(storedUser));
+          } catch (parseError) {
+            console.warn('Invalid stored user found, clearing session user:', parseError);
+            sessionStorage.removeItem('user');
+          }
+        } else if (!apiClient.hasToken()) {
+          // Keep session storage/state consistent when no user and no token.
+          apiClient.logout();
         }
 
         // Verify token is still valid by fetching current user
@@ -67,21 +106,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     initializeAuth();
 
-    // Set up global error handler for 401 responses
+    const isAuthPage = location.pathname === '/login' || location.pathname === '/register';
+
+    // Set up global error handler for 401 responses.
     apiClient.setUnauthorizedHandler(() => {
       setUser(null);
+      setIsGuest(false);
+      setGuestQueriesRemaining(GUEST_QUERY_LIMIT);
       sessionStorage.removeItem('user');
+      sessionStorage.removeItem('is_guest');
+      sessionStorage.removeItem('guest_queries_remaining');
       apiClient.logout();
-      router.push('/login');
-    });
-  }, [router]);
 
-  const handleLogin = useCallback(async (username: string, password: string) => {
+      // Avoid redirect loops when we are already on an auth page.
+      if (!isAuthPage) {
+        navigate('/login', { replace: true, state: { from: location.pathname } });
+      }
+    });
+
+    return () => {
+      apiClient.clearUnauthorizedHandler();
+    };
+  }, [location.pathname, navigate]);
+
+  const handleLogin = useCallback(async (email: string, password: string) => {
     setIsLoading(true);
     setError(null);
 
     try {
-      const response = await AuthAPI.login({ username, password });
+      const response = await AuthAPI.login({ email, password });
 
       if (!response.data) {
         throw new Error(response.error || 'Login failed');
@@ -89,9 +142,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       const userData = response.data.user;
       setUser(userData);
+      setIsGuest(false);
+      setGuestQueriesRemaining(GUEST_QUERY_LIMIT);
+      sessionStorage.removeItem('is_guest');
+      sessionStorage.removeItem('guest_queries_remaining');
       sessionStorage.setItem('user', JSON.stringify(userData));
 
-      router.push('/chat');
+      navigate('/chat');
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Login failed';
       setError(errorMsg);
@@ -99,20 +156,52 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsLoading(false);
     }
-  }, [router]);
+  }, [navigate]);
 
   const handleRegister = useCallback(
-    async (email: string, username: string, password: string, password2: string) => {
+    async (...args: RegisterInput) => {
       setIsLoading(true);
       setError(null);
 
       try {
-        const response = await AuthAPI.register({
+        let email = '';
+        let password = '';
+        let firstName = '';
+        let lastName = '';
+
+        if (typeof args[0] === 'string') {
+          const [name, emailArg, passwordArg] = args as [string, string, string];
+          email = emailArg;
+          password = passwordArg;
+          const [first = '', ...rest] = name.trim().split(/\s+/);
+          firstName = first;
+          lastName = rest.join(' ');
+        } else {
+          const payload = args[0];
+          email = payload.email;
+          password = payload.password;
+          firstName = payload.first_name || '';
+          lastName = payload.last_name || '';
+        }
+
+        const username = email.split('@')[0] || email;
+        const fullName = [firstName, lastName].filter(Boolean).join(' ').trim();
+
+        // #region agent log
+        fetch('http://127.0.0.1:7247/ingest/bc726661-d383-4043-b18b-3deaa5cf7028',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'c2a3f7'},body:JSON.stringify({sessionId:'c2a3f7',runId:'pre-fix',hypothesisId:'H4',location:'AuthContext.tsx:handleRegister:before-api',message:'Register flow started',data:{emailDomain:email.includes('@')?email.split('@')[1]:'invalid',hasFirstName:Boolean(firstName),hasLastName:Boolean(lastName),passwordLength:password.length,usernameLength:username.length},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+
+        const response = await AuthAPI.registerAndLogin({
           email,
           username,
           password,
-          password2,
+          password_confirm: password,
+          full_name: fullName || undefined,
         });
+
+        // #region agent log
+        fetch('http://127.0.0.1:7247/ingest/bc726661-d383-4043-b18b-3deaa5cf7028',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'c2a3f7'},body:JSON.stringify({sessionId:'c2a3f7',runId:'pre-fix',hypothesisId:'H4',location:'AuthContext.tsx:handleRegister:after-api',message:'Register API completed',data:{status:response.status,hasData:Boolean(response.data),hasError:Boolean(response.error)},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
 
         if (!response.data) {
           throw new Error(response.error || 'Registration failed');
@@ -120,10 +209,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
         const userData = response.data.user;
         setUser(userData);
+        setIsGuest(false);
+        setGuestQueriesRemaining(GUEST_QUERY_LIMIT);
+        sessionStorage.removeItem('is_guest');
+        sessionStorage.removeItem('guest_queries_remaining');
         sessionStorage.setItem('user', JSON.stringify(userData));
 
-        router.push('/chat');
+        navigate('/chat');
       } catch (err) {
+        // #region agent log
+        fetch('http://127.0.0.1:7247/ingest/bc726661-d383-4043-b18b-3deaa5cf7028',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'c2a3f7'},body:JSON.stringify({sessionId:'c2a3f7',runId:'pre-fix',hypothesisId:'H4',location:'AuthContext.tsx:handleRegister:catch',message:'Register flow failed',data:{errorMessage:err instanceof Error?err.message:'unknown'},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
         const errorMsg = err instanceof Error ? err.message : 'Registration failed';
         setError(errorMsg);
         throw err;
@@ -131,7 +227,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setIsLoading(false);
       }
     },
-    [router]
+    [navigate]
   );
 
   const handleLogout = useCallback(async () => {
@@ -143,11 +239,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       console.error('Logout error:', err);
     } finally {
       setUser(null);
+      setIsGuest(false);
+      setGuestQueriesRemaining(GUEST_QUERY_LIMIT);
       sessionStorage.removeItem('user');
+      sessionStorage.removeItem('is_guest');
+      sessionStorage.removeItem('guest_queries_remaining');
       setIsLoading(false);
-      router.push('/');
+      navigate('/');
     }
-  }, [router]);
+  }, [navigate]);
 
   const handleRefreshUser = useCallback(async () => {
     try {
@@ -161,16 +261,53 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const handleContinueAsGuest = useCallback(() => {
+    const guestUser: User = {
+      id: 0,
+      name: 'Guest User',
+      email: '',
+      username: 'guest',
+      role: 'guest',
+      created_at: new Date().toISOString(),
+    };
+
+    setUser(guestUser);
+    setIsGuest(true);
+    setGuestQueriesRemaining(GUEST_QUERY_LIMIT);
+    setError(null);
+
+    sessionStorage.setItem('user', JSON.stringify(guestUser));
+    sessionStorage.setItem('is_guest', 'true');
+    sessionStorage.setItem('guest_queries_remaining', String(GUEST_QUERY_LIMIT));
+  }, []);
+
+  const handleConsumeGuestQuery = useCallback(() => {
+    if (!isGuest) return true;
+
+    if (guestQueriesRemaining <= 0) {
+      return false;
+    }
+
+    const next = guestQueriesRemaining - 1;
+    setGuestQueriesRemaining(next);
+    sessionStorage.setItem('guest_queries_remaining', String(next));
+    return true;
+  }, [guestQueriesRemaining, isGuest]);
+
   const value: AuthContextType = {
     user,
     isLoading,
-    isAuthenticated: !!user,
+    isAuthenticated: !!user && !isGuest,
+    isGuest,
     isAdmin: user?.role === 'admin',
+    guestQueriesRemaining,
     error,
     login: handleLogin,
     register: handleRegister,
     logout: handleLogout,
     refreshUser: handleRefreshUser,
+    continueAsGuest: handleContinueAsGuest,
+    consumeGuestQuery: handleConsumeGuestQuery,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

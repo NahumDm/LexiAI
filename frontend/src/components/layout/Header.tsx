@@ -20,6 +20,8 @@ interface HeaderProps {
 
 export function Header({ onLoginClick, onRegisterClick, variant = 'landing' }: HeaderProps) {
   const { user, isAuthenticated, isGuest, isAdmin, logout } = useAuth();
+  const displayName = user?.name?.trim() || user?.username || user?.email || 'User';
+  const avatarInitial = displayName.charAt(0).toUpperCase();
 
   const isLanding = variant === 'landing';
   const headerBg = isLanding ? 'bg-transparent' : 'bg-card border-b border-border';
@@ -50,15 +52,15 @@ export function Header({ onLoginClick, onRegisterClick, variant = 'landing' }: H
                 <Button variant="ghost" className="flex items-center gap-2">
                   <div className="h-8 w-8 rounded-full bg-primary flex items-center justify-center">
                     <span className="text-primary-foreground text-sm font-medium">
-                      {user.name.charAt(0).toUpperCase()}
+                      {avatarInitial}
                     </span>
                   </div>
-                  <span className="hidden sm:inline text-foreground">{user.name}</span>
+                  <span className="hidden sm:inline text-foreground">{displayName}</span>
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56">
                 <div className="px-2 py-1.5">
-                  <p className="text-sm font-medium">{user.name}</p>
+                  <p className="text-sm font-medium">{displayName}</p>
                   <p className="text-xs text-muted-foreground">{user.email || 'Guest User'}</p>
                 </div>
                 <DropdownMenuSeparator />

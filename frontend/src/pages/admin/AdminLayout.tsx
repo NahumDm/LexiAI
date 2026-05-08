@@ -4,11 +4,15 @@ import { AdminSidebar } from '@/components/admin/AdminSidebar';
 import { useAuth } from '@/contexts/AuthContext';
 
 export default function AdminLayout() {
-  const { isAdmin, user } = useAuth();
+  const { isAdmin, user, isLoading } = useAuth();
+
+  if (isLoading) {
+    return <div className="flex items-center justify-center p-8">Loading...</div>;
+  }
 
   // Redirect non-admin users
   if (!user) {
-    return <Navigate to="/" replace />;
+    return <Navigate to="/login" replace />;
   }
 
   if (!isAdmin) {

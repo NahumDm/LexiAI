@@ -37,6 +37,7 @@ export function ChatSidebar({
   onSelectConversation,
   onNewConversation,
   onDeleteConversation,
+  isLoading = false,
 }: ChatSidebarProps) {
   const { isAuthenticated, isGuest } = useAuth();
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);

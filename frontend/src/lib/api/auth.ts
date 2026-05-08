@@ -7,17 +7,20 @@ import { apiClient, ApiResponse } from './client';
 
 export interface User {
   id: number;
+  name: string;
   email: string;
   username: string;
   first_name?: string;
   last_name?: string;
   role: 'guest' | 'user' | 'admin';
-  is_active: boolean;
+  is_active?: boolean;
+  is_verified?: boolean;
+  is_premium?: boolean;
   created_at: string;
 }
 
 export interface LoginRequest {
-  username: string;
+  email: string;
   password: string;
 }
 
@@ -31,24 +34,81 @@ export interface RegisterRequest {
   email: string;
   username: string;
   password: string;
-  password2: string;
+  password_confirm: string;
+  full_name?: string;
 }
 
 export interface RegisterResponse {
-  user: User;
-  access: string;
-  refresh: string;
+  id: number;
+  email: string;
+  username: string | null;
+  first_name?: string;
+  last_name?: string;
+  role?: { code?: string; name?: string } | string | null;
+  created_at: string;
 }
+
+type BackendUser = {
+  id: number;
+  email: string;
+  username?: string | null;
+  first_name?: string;
+  last_name?: string;
+  role?: { code?: string; name?: string } | string | null;
+  is_active?: boolean;
+  is_verified?: boolean;
+  is_premium?: boolean;
+  created_at: string;
+};
+
+const normalizeRole = (role: BackendUser['role']): User['role'] => {
+  if (typeof role === 'string') {
+    if (role === 'admin' || role === 'guest') return role;
+    return 'user';
+  }
+
+  if (role?.code === 'admin') return 'admin';
+  if (role?.code === 'guest') return 'guest';
+  return 'user';
+};
+
+const buildDisplayName = (raw: BackendUser): string => {
+  const fullName = `${raw.first_name || ''} ${raw.last_name || ''}`.trim();
+  if (fullName) return fullName;
+  if (raw.username) return raw.username;
+  return raw.email;
+};
+
+export const normalizeUser = (raw: BackendUser): User => ({
+  id: raw.id,
+  name: buildDisplayName(raw),
+  email: raw.email,
+  username: raw.username || raw.email,
+  first_name: raw.first_name,
+  last_name: raw.last_name,
+  role: normalizeRole(raw.role),
+  is_active: raw.is_active,
+  is_verified: raw.is_verified,
+  is_premium: raw.is_premium,
+  created_at: raw.created_at,
+});
 
 export class AuthAPI {
   /**
    * Login user and store tokens
    */
   static async login(credentials: LoginRequest): Promise<ApiResponse<LoginResponse>> {
-    const response = await apiClient.post<LoginResponse>('/auth/login/', credentials);
+    const response = await apiClient.post<LoginResponse>('/auth/login/', {
+      email: credentials.email,
+      password: credentials.password,
+    });
 
-    if (response.data) {
+    if (response.data?.access) {
       apiClient.setAuthTokens(response.data.access, response.data.refresh);
+    }
+
+    if (response.data?.user) {
+      response.data.user = normalizeUser(response.data.user as unknown as BackendUser);
     }
 
     return response;
@@ -58,27 +118,55 @@ export class AuthAPI {
    * Register new user
    */
   static async register(data: RegisterRequest): Promise<ApiResponse<RegisterResponse>> {
-    const response = await apiClient.post<RegisterResponse>('/auth/register/', data);
+    return apiClient.post<RegisterResponse>('/auth/register/', data);
+  }
 
-    if (response.data) {
-      apiClient.setAuthTokens(response.data.access, response.data.refresh);
+  /**
+   * Register and immediately login user
+   */
+  static async registerAndLogin(data: RegisterRequest): Promise<ApiResponse<LoginResponse>> {
+    const registerResponse = await this.register(data);
+    if (!registerResponse.data) {
+      return {
+        status: registerResponse.status,
+        error: registerResponse.error || 'Registration failed',
+      };
     }
 
-    return response;
+    return this.login({
+      email: data.email,
+      password: data.password,
+    });
   }
 
   /**
    * Get current user profile
    */
   static async getCurrentUser(): Promise<ApiResponse<User>> {
-    return apiClient.get<User>('/accounts/me/');
+    const response = await apiClient.get<BackendUser>('/auth/profile/');
+    if (!response.data) {
+      return response as ApiResponse<User>;
+    }
+
+    return {
+      ...response,
+      data: normalizeUser(response.data),
+    };
   }
 
   /**
    * Update user profile
    */
   static async updateProfile(updates: Partial<User>): Promise<ApiResponse<User>> {
-    return apiClient.patch<User>('/accounts/me/', updates);
+    const response = await apiClient.patch<BackendUser>('/auth/profile/', updates);
+    if (!response.data) {
+      return response as ApiResponse<User>;
+    }
+
+    return {
+      ...response,
+      data: normalizeUser(response.data),
+    };
   }
 
   /**

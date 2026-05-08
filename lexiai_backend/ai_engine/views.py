@@ -11,7 +11,6 @@ from rest_framework.response import Response
 
 from ai_engine.models import QueryFeedback, QueryLog
 from ai_engine.serializers import ChatQuerySerializer, ChatResponseSerializer, QueryFeedbackSerializer
-from ai_engine.services.rag import RAGPipeline
 from conversations.models import Conversation
 from conversations.permissions import IsConversationOwner
 
@@ -61,6 +60,8 @@ class ChatAskView(generics.CreateAPIView):
 			)
 
 		try:
+			from ai_engine.services.rag import RAGPipeline
+
 			pipeline = RAGPipeline()
 			chat_response = pipeline.process_query(
 				query=query,

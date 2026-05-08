@@ -23,7 +23,8 @@ export default function LoginPage() {
   // Redirect to chat if already logged in
   useEffect(() => {
     if (isAuthenticated) {
-      const from = location.state?.from?.pathname || '/chat';
+      const fromState = location.state?.from;
+      const from = typeof fromState === 'string' ? fromState : fromState?.pathname || '/chat';
       navigate(from, { replace: true });
     }
   }, [isAuthenticated, navigate, location]);

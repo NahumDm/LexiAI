@@ -31,7 +31,7 @@ interface ChatMessageProps {
 }
 
 export function ChatMessage({ message, onFeedback }: ChatMessageProps) {
-  const { isAuthenticated, isGuest } = useAuth();
+  const { isAuthenticated } = useAuth();
 
   // Support both legacy UI message shape and backend ConversationMessage shape
   const isNewShape = (message as any).sender !== undefined;
@@ -89,140 +89,142 @@ export function ChatMessage({ message, onFeedback }: ChatMessageProps) {
   };
 
   return (
-    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} mb-4 animate-slide-up`}>
-      <div className={`max-w-[85%] ${isUser ? 'order-1' : ''}`}>
-        {/* Message bubble */}
-        <div className={`chat-bubble ${isUser ? 'chat-bubble-user' : 'chat-bubble-ai'}`}>
-          <p className="whitespace-pre-wrap leading-relaxed">{message.content}</p>
-        </div>
+    <>
+      <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} mb-4 animate-slide-up`}>
+        <div className={`max-w-[85%] ${isUser ? 'order-1' : ''}`}>
+          {/* Message bubble */}
+          <div className={`chat-bubble ${isUser ? 'chat-bubble-user' : 'chat-bubble-ai'}`}>
+            <p className="whitespace-pre-wrap leading-relaxed">{message.content}</p>
+          </div>
 
-        {/* AI Response extras */}
-        {!isUser && (
-          <div className="mt-2 space-y-2">
-                {/* Confidence indicator */}
-                {confidence !== undefined && confidence !== null && (
-                  <div className="confidence-indicator">
-                    <Sparkles className="h-3 w-3" />
-                    <span>Confidence: {Math.round(confidence * 100)}%</span>
-                  </div>
-                )}
+          {/* AI Response extras */}
+          {!isUser && (
+            <div className="mt-2 space-y-2">
+              {/* Confidence indicator */}
+              {confidence !== undefined && confidence !== null && (
+                <div className="confidence-indicator">
+                  <Sparkles className="h-3 w-3" />
+                  <span>Confidence: {Math.round(confidence * 100)}%</span>
+                </div>
+              )}
 
-            {/* Citations */}
-            {citations && citations.length > 0 && (
-              <div className="space-y-2">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-auto py-1 px-2 text-xs text-muted-foreground hover:text-foreground"
-                  onClick={() => setShowCitations(!showCitations)}
-                >
-                  <FileText className="h-3 w-3 mr-1" />
-                  {citations.length} Source{citations.length > 1 ? 's' : ''}
-                  {showCitations ? <ChevronUp className="h-3 w-3 ml-1" /> : <ChevronDown className="h-3 w-3 ml-1" />}
-                </Button>
+              {/* Citations */}
+              {citations && citations.length > 0 && (
+                <div className="space-y-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-auto py-1 px-2 text-xs text-muted-foreground hover:text-foreground"
+                    onClick={() => setShowCitations(!showCitations)}
+                  >
+                    <FileText className="h-3 w-3 mr-1" />
+                    {citations.length} Source{citations.length > 1 ? 's' : ''}
+                    {showCitations ? <ChevronUp className="h-3 w-3 ml-1" /> : <ChevronDown className="h-3 w-3 ml-1" />}
+                  </Button>
 
-                {showCitations && (
-                  <div className="space-y-2 pl-2 border-l-2 border-secondary/30">
-                    {citations.map((citation, i) => (
-                      <CitationCard key={citation.chunk_id ?? i} citation={citation as any} />
-                    ))}
-                  </div>
+                  {showCitations && (
+                    <div className="space-y-2 pl-2 border-l-2 border-secondary/30">
+                      {citations.map((citation, i) => (
+                        <CitationCard key={citation.chunk_id ?? i} citation={citation as any} />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Feedback */}
+              <div className="flex items-center gap-2">
+                {isAuthenticated && queryLogId ? (
+                  <>
+                    <span className="text-xs text-muted-foreground">Was this helpful?</span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className={`h-7 w-7 p-0 ${feedback === 1 ? 'text-success' : 'text-muted-foreground'}`}
+                      onClick={() => handleFeedbackClick('up')}
+                      disabled={isSubmittingFeedback}
+                    >
+                      <ThumbsUp className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className={`h-7 w-7 p-0 ${feedback === -1 ? 'text-destructive' : 'text-muted-foreground'}`}
+                      onClick={() => handleFeedbackClick('down')}
+                      disabled={isSubmittingFeedback}
+                    >
+                      <ThumbsDown className="h-4 w-4" />
+                    </Button>
+                  </>
+                ) : !isAuthenticated ? (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="text-xs text-muted-foreground cursor-help">
+                        Login to provide feedback
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p>Sign in to rate responses and help improve our AI</p>
+                    </TooltipContent>
+                  </Tooltip>
+                ) : null}
+                {isAuthenticated && !queryLogId && (
+                  <span className="text-xs text-muted-foreground">
+                    Feedback unavailable for this message
+                  </span>
                 )}
               </div>
-            )}
-
-            {/* Feedback */}
-            <div className="flex items-center gap-2">
-              {isAuthenticated && queryLogId ? (
-                <>
-                  <span className="text-xs text-muted-foreground">Was this helpful?</span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className={`h-7 w-7 p-0 ${feedback === 1 ? 'text-success' : 'text-muted-foreground'}`}
-                    onClick={() => handleFeedbackClick('up')}
-                    disabled={isSubmittingFeedback}
-                  >
-                    <ThumbsUp className="h-4 w-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className={`h-7 w-7 p-0 ${feedback === -1 ? 'text-destructive' : 'text-muted-foreground'}`}
-                    onClick={() => handleFeedbackClick('down')}
-                    disabled={isSubmittingFeedback}
-                  >
-                    <ThumbsDown className="h-4 w-4" />
-                  </Button>
-                </>
-              ) : !isAuthenticated ? (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span className="text-xs text-muted-foreground cursor-help">
-                      Login to provide feedback
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    <p>Sign in to rate responses and help improve our AI</p>
-                  </TooltipContent>
-                </Tooltip>
-              )}
-              {isAuthenticated && !queryLogId && (
-                <span className="text-xs text-muted-foreground">
-                  Feedback unavailable for this message
-                </span>
-              )}
             </div>
-          </div>
-        )}
+          )}
 
-        {/* Timestamp */}
-        <p className={`text-[10px] text-muted-foreground mt-1 ${isUser ? 'text-right' : ''}`}>
-          {timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-        </p>
-      </div>
-    </div>
-
-    {/* Feedback Dialog */}
-    <Dialog open={showFeedbackDialog} onOpenChange={setShowFeedbackDialog}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Provide Feedback</DialogTitle>
-          <DialogDescription>
-            {pendingFeedbackRating === 'up'
-              ? 'Great! What was most helpful about this response?'
-              : 'We\'re sorry this response wasn\'t helpful. How can we improve?'}
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="space-y-4">
-          <Textarea
-            placeholder="Optional: Share your feedback..."
-            value={feedbackComment}
-            onChange={(e) => setFeedbackComment(e.target.value)}
-            disabled={isSubmittingFeedback}
-            rows={4}
-          />
+          {/* Timestamp */}
+          <p className={`text-[10px] text-muted-foreground mt-1 ${isUser ? 'text-right' : ''}`}>
+            {timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+          </p>
         </div>
+      </div>
 
-        <DialogFooter>
-          <Button
-            variant="outline"
-            onClick={() => {
-              setShowFeedbackDialog(false);
-              setFeedbackComment('');
-              setPendingFeedbackRating(null);
-            }}
-            disabled={isSubmittingFeedback}
-          >
-            Cancel
-          </Button>
-          <Button onClick={handleSubmitFeedback} disabled={isSubmittingFeedback}>
-            {isSubmittingFeedback ? 'Submitting...' : 'Submit'}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      {/* Feedback Dialog */}
+      <Dialog open={showFeedbackDialog} onOpenChange={setShowFeedbackDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Provide Feedback</DialogTitle>
+            <DialogDescription>
+              {pendingFeedbackRating === 'up'
+                ? 'Great! What was most helpful about this response?'
+                : 'We\'re sorry this response wasn\'t helpful. How can we improve?'}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <Textarea
+              placeholder="Optional: Share your feedback..."
+              value={feedbackComment}
+              onChange={(e) => setFeedbackComment(e.target.value)}
+              disabled={isSubmittingFeedback}
+              rows={4}
+            />
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setShowFeedbackDialog(false);
+                setFeedbackComment('');
+                setPendingFeedbackRating(null);
+              }}
+              disabled={isSubmittingFeedback}
+            >
+              Cancel
+            </Button>
+            <Button onClick={handleSubmitFeedback} disabled={isSubmittingFeedback}>
+              {isSubmittingFeedback ? 'Submitting...' : 'Submit'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 

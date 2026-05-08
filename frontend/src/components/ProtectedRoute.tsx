@@ -4,42 +4,41 @@
  * Optionally restricts to admin users (requireAdmin prop)
  */
 
-'use client';
-
-import React, { useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import React from 'react';
+import { Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
   requireAdmin?: boolean;
   fallback?: React.ReactNode;
+  redirectTo?: string;
+  allowGuest?: boolean;
 }
 
-export const ProtectedRoute = ({ children, requireAdmin = false, fallback }: ProtectedRouteProps) => {
-  const { isAuthenticated, isAdmin, isLoading } = useAuth();
-  const router = useRouter();
-
-  useEffect(() => {
-    if (!isLoading) {
-      if (!isAuthenticated) {
-        // Redirect to login
-        router.push('/login');
-      } else if (requireAdmin && !isAdmin) {
-        // Redirect to unauthorized or back to chat
-        router.push('/chat');
-      }
-    }
-  }, [isAuthenticated, isAdmin, isLoading, requireAdmin, router]);
+export const ProtectedRoute = ({
+  children,
+  requireAdmin = false,
+  fallback,
+  redirectTo = '/login',
+  allowGuest = false,
+}: ProtectedRouteProps) => {
+  const { isAuthenticated, isAdmin, isLoading, isGuest } = useAuth();
+  const location = useLocation();
 
   // Show loading state or fallback while checking auth
   if (isLoading) {
     return fallback || <div className="flex items-center justify-center p-8">Loading...</div>;
   }
 
-  // Not authenticated and not admin (when required)
-  if (!isAuthenticated || (requireAdmin && !isAdmin)) {
-    return fallback || <div className="flex items-center justify-center p-8">Access Denied</div>;
+  // Redirect unauthenticated users to login and preserve intended path.
+  if (!isAuthenticated && !(allowGuest && isGuest)) {
+    return <Navigate to={redirectTo} replace state={{ from: location.pathname }} />;
+  }
+
+  // Authenticated but unauthorized for this route.
+  if (requireAdmin && !isAdmin) {
+    return <Navigate to="/chat" replace />;
   }
 
   // Render protected content

@@ -7,7 +7,6 @@ from .models import Document
 from .models import DocumentIngestionJob
 from .serializers import DocumentIngestionJobSerializer, DocumentSerializer
 from .tasks import process_tax_document_ingestion_job
-from ai_engine.tasks import embed_document_chunks
 
 
 class DocumentQuerysetMixin:
@@ -21,6 +20,8 @@ class DocumentListCreateView(DocumentQuerysetMixin, generics.ListCreateAPIView):
 
     def perform_create(self, serializer):
         document = serializer.save()
+        from ai_engine.tasks import embed_document_chunks
+
         transaction.on_commit(lambda: embed_document_chunks.delay(document.pk))
 
 
