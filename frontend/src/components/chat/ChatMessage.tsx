@@ -1,6 +1,16 @@
 import React, { useState } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
+import { useChat } from '@/contexts/ChatContext';
 import type { ConversationMessage, ChatSource } from '@/lib/api/chat';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from '@/components/ui/dialog';
+import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import { ThumbsUp, ThumbsDown, FileText, ChevronDown, ChevronUp, Sparkles } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -41,13 +51,41 @@ export function ChatMessage({ message, onFeedback }: ChatMessageProps) {
     ? (message as ConversationMessage).metadata?.sources
     : (message as LegacyMessage).citations as any;
 
+  const { submitFeedback: submitChatFeedback } = useChat();
   const [showCitations, setShowCitations] = useState(false);
   const [feedback, setFeedback] = useState<number | null>((message as any).feedback?.rating || null);
+  const [showFeedbackDialog, setShowFeedbackDialog] = useState(false);
+  const [feedbackComment, setFeedbackComment] = useState('');
+  const [isSubmittingFeedback, setIsSubmittingFeedback] = useState(false);
+  const [pendingFeedbackRating, setPendingFeedbackRating] = useState<'up' | 'down' | null>(null);
 
-  const handleFeedback = (rating: number) => {
+  // Get queryLogId from message metadata if available
+  const queryLogId = isNewShape
+    ? (message as ConversationMessage).metadata?.query_log_id
+    : (message as any).queryLogId;
+
+  const handleFeedbackClick = (rating: 'up' | 'down') => {
     if (!isAuthenticated) return;
-    setFeedback(rating);
-    onFeedback?.(rating);
+    setPendingFeedbackRating(rating);
+    setShowFeedbackDialog(true);
+  };
+
+  const handleSubmitFeedback = async () => {
+    if (!queryLogId || !pendingFeedbackRating) return;
+
+    setIsSubmittingFeedback(true);
+    try {
+      await submitChatFeedback(queryLogId, pendingFeedbackRating, feedbackComment || undefined);
+      setFeedback(pendingFeedbackRating === 'up' ? 1 : -1);
+      setShowFeedbackDialog(false);
+      setFeedbackComment('');
+      setPendingFeedbackRating(null);
+      onFeedback?.(pendingFeedbackRating === 'up' ? 1 : -1);
+    } catch (err) {
+      console.error('Failed to submit feedback:', err);
+    } finally {
+      setIsSubmittingFeedback(false);
+    }
   };
 
   return (
@@ -95,14 +133,15 @@ export function ChatMessage({ message, onFeedback }: ChatMessageProps) {
 
             {/* Feedback */}
             <div className="flex items-center gap-2">
-              {isAuthenticated ? (
+              {isAuthenticated && queryLogId ? (
                 <>
                   <span className="text-xs text-muted-foreground">Was this helpful?</span>
                   <Button
                     variant="ghost"
                     size="sm"
                     className={`h-7 w-7 p-0 ${feedback === 1 ? 'text-success' : 'text-muted-foreground'}`}
-                    onClick={() => handleFeedback(1)}
+                    onClick={() => handleFeedbackClick('up')}
+                    disabled={isSubmittingFeedback}
                   >
                     <ThumbsUp className="h-4 w-4" />
                   </Button>
@@ -110,12 +149,13 @@ export function ChatMessage({ message, onFeedback }: ChatMessageProps) {
                     variant="ghost"
                     size="sm"
                     className={`h-7 w-7 p-0 ${feedback === -1 ? 'text-destructive' : 'text-muted-foreground'}`}
-                    onClick={() => handleFeedback(-1)}
+                    onClick={() => handleFeedbackClick('down')}
+                    disabled={isSubmittingFeedback}
                   >
                     <ThumbsDown className="h-4 w-4" />
                   </Button>
                 </>
-              ) : (
+              ) : !isAuthenticated ? (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <span className="text-xs text-muted-foreground cursor-help">
@@ -127,6 +167,11 @@ export function ChatMessage({ message, onFeedback }: ChatMessageProps) {
                   </TooltipContent>
                 </Tooltip>
               )}
+              {isAuthenticated && !queryLogId && (
+                <span className="text-xs text-muted-foreground">
+                  Feedback unavailable for this message
+                </span>
+              )}
             </div>
           </div>
         )}
@@ -137,6 +182,47 @@ export function ChatMessage({ message, onFeedback }: ChatMessageProps) {
         </p>
       </div>
     </div>
+
+    {/* Feedback Dialog */}
+    <Dialog open={showFeedbackDialog} onOpenChange={setShowFeedbackDialog}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Provide Feedback</DialogTitle>
+          <DialogDescription>
+            {pendingFeedbackRating === 'up'
+              ? 'Great! What was most helpful about this response?'
+              : 'We\'re sorry this response wasn\'t helpful. How can we improve?'}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          <Textarea
+            placeholder="Optional: Share your feedback..."
+            value={feedbackComment}
+            onChange={(e) => setFeedbackComment(e.target.value)}
+            disabled={isSubmittingFeedback}
+            rows={4}
+          />
+        </div>
+
+        <DialogFooter>
+          <Button
+            variant="outline"
+            onClick={() => {
+              setShowFeedbackDialog(false);
+              setFeedbackComment('');
+              setPendingFeedbackRating(null);
+            }}
+            disabled={isSubmittingFeedback}
+          >
+            Cancel
+          </Button>
+          <Button onClick={handleSubmitFeedback} disabled={isSubmittingFeedback}>
+            {isSubmittingFeedback ? 'Submitting...' : 'Submit'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
