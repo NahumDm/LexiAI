@@ -5,13 +5,53 @@ import tempfile
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import override_settings
+from pathlib import Path
+
+from django.core.management.base import CommandError
+from django.test import TestCase, override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from .models import Document, DocumentIngestionJob
+from .services import resolve_ingestion_source
 
 User = get_user_model()
+
+
+class ResolveIngestionSourceTests(TestCase):
+	def test_relative_dir_next_to_django_project_is_found(self):
+		with tempfile.TemporaryDirectory() as tmp:
+			tmp_path = Path(tmp)
+			fake_base = tmp_path / 'lexiai_backend_pkg'
+			fake_base.mkdir()
+			repo_tax_doc = tmp_path / 'tax_doc'
+			repo_tax_doc.mkdir()
+			with override_settings(BASE_DIR=fake_base):
+				resolved = resolve_ingestion_source('tax_doc')
+				self.assertEqual(resolved.resolve(), repo_tax_doc.resolve())
+
+	def test_relative_dir_inside_django_project_takes_priority(self):
+		with tempfile.TemporaryDirectory() as tmp:
+			tmp_path = Path(tmp)
+			fake_base = tmp_path / 'lexiai_backend_pkg'
+			fake_base.mkdir()
+			inner = fake_base / 'tax_doc'
+			inner.mkdir()
+			outer = tmp_path / 'tax_doc'
+			outer.mkdir()
+			with override_settings(BASE_DIR=fake_base):
+				resolved = resolve_ingestion_source('tax_doc')
+				self.assertEqual(resolved.resolve(), inner.resolve())
+
+	def test_missing_relative_raises_with_tried_paths(self):
+		with tempfile.TemporaryDirectory() as tmp:
+			fake_base = Path(tmp) / 'lexiai_backend_pkg'
+			fake_base.mkdir()
+			with override_settings(BASE_DIR=fake_base):
+				with self.assertRaises(CommandError) as ctx:
+					resolve_ingestion_source('tax_doc')
+				self.assertIn('does not exist', str(ctx.exception))
+				self.assertIn('Tried:', str(ctx.exception))
 
 
 class DocumentApiTests(APITestCase):

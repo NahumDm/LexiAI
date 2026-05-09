@@ -4,13 +4,23 @@ from celery import shared_task
 from django.utils import timezone
 
 from .models import DocumentIngestionJob
-from .services import ingest_tax_documents
+from .services import _agent_debug_log, ingest_tax_documents
 
 
 @shared_task(bind=True)
 def process_tax_document_ingestion_job(self, job_id: int) -> None:
     job = DocumentIngestionJob.objects.select_related('owner', 'requested_by').get(pk=job_id)
+    _agent_debug_log(
+        'process_tax_document_ingestion_job entered',
+        {'job_id': job_id, 'source_dir': job.source_dir, 'job_status': job.status},
+        'H4',
+    )
     if job.status in {DocumentIngestionJob.Status.RUNNING, DocumentIngestionJob.Status.SUCCEEDED}:
+        _agent_debug_log(
+            'process_tax_document_ingestion_job skipped',
+            {'job_id': job_id, 'source_dir': job.source_dir, 'job_status': job.status},
+            'H4',
+        )
         return
 
     job.status = DocumentIngestionJob.Status.RUNNING
@@ -21,6 +31,16 @@ def process_tax_document_ingestion_job(self, job_id: int) -> None:
     try:
         ingest_tax_documents(job.source_dir, job.owner, requested_by=job.requested_by, job=job)
     except Exception as exc:
+        _agent_debug_log(
+            'process_tax_document_ingestion_job exception',
+            {
+                'job_id': job_id,
+                'source_dir': job.source_dir,
+                'exc_type': type(exc).__name__,
+                'exc': str(exc)[:800],
+            },
+            'H5',
+        )
         job.status = DocumentIngestionJob.Status.FAILED
         job.error_message = str(exc)
         job.finished_at = timezone.now()

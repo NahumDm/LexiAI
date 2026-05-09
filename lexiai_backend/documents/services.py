@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import logging
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -15,14 +18,99 @@ from .models import Document
 SUPPORTED_SUFFIXES = {'.txt', '.md', '.rtf', '.csv', '.json', '.pdf'}
 ProgressCallback = Callable[[Path, int, int], None]
 
+logger = logging.getLogger(__name__)
+
+
+def _agent_debug_log(message: str, data: dict, hypothesis_id: str) -> None:
+    # region agent log
+    payload = {
+        'sessionId': 'a2073f',
+        'timestamp': int(time.time() * 1000),
+        'location': 'documents.services',
+        'message': message,
+        'data': data,
+        'hypothesisId': hypothesis_id,
+    }
+    line = json.dumps(payload, default=str) + '\n'
+    paths: list[Path] = [
+        settings.BASE_DIR.parent / 'debug-a2073f.log',
+        settings.BASE_DIR / 'debug-a2073f.log',
+    ]
+    try:
+        media_root = settings.MEDIA_ROOT
+        media_root.mkdir(parents=True, exist_ok=True)
+        paths.append(media_root / 'debug-a2073f.log')
+    except OSError:
+        pass
+    written = False
+    for log_path in paths:
+        try:
+            with open(log_path, 'a', encoding='utf-8') as fh:
+                fh.write(line)
+            written = True
+        except OSError:
+            continue
+    if not written:
+        logger.warning('agent_debug_ndjson_fallback %s', line.strip())
+    # endregion
+
 
 def resolve_ingestion_source(source_dir: str | Path) -> Path:
+    """
+    Resolve ingestion directory. Relative paths try, in order:
+    1) BASE_DIR / name (e.g. tax_doc next to manage.py)
+    2) BASE_DIR.parent / name (repo-root sibling; matches Docker ..:/app with tax_doc at /app/tax_doc)
+    """
     source_path = Path(source_dir)
-    if not source_path.is_absolute():
-        source_path = settings.BASE_DIR / source_path
-    if not source_path.exists() or not source_path.is_dir():
-        raise CommandError(f'Source directory does not exist: {source_path}')
-    return source_path
+    if source_path.is_absolute():
+        resolved = source_path.resolve()
+        ok = resolved.exists() and resolved.is_dir()
+        _agent_debug_log(
+            'resolve_ingestion_source absolute',
+            {'source_dir': str(source_dir), 'resolved': str(resolved), 'ok': ok},
+            'H2',
+        )
+        if not ok:
+            raise CommandError(f'Source directory does not exist: {resolved}')
+        return resolved
+
+    candidates = (
+        settings.BASE_DIR / source_path,
+        settings.BASE_DIR.parent / source_path,
+    )
+    tried: list[Path] = []
+    detail: list[dict] = []
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        tried.append(resolved)
+        exists = resolved.exists()
+        is_dir = resolved.is_dir() if exists else False
+        detail.append({'path': str(resolved), 'exists': exists, 'is_dir': is_dir})
+        if exists and is_dir:
+            _agent_debug_log(
+                'resolve_ingestion_source ok',
+                {
+                    'source_dir': str(source_dir),
+                    'base_dir': str(settings.BASE_DIR),
+                    'base_parent': str(settings.BASE_DIR.parent),
+                    'chosen': str(resolved),
+                    'candidate_detail': detail,
+                },
+                'H1',
+            )
+            return resolved
+    _agent_debug_log(
+        'resolve_ingestion_source failed',
+        {
+            'source_dir': str(source_dir),
+            'base_dir': str(settings.BASE_DIR),
+            'base_parent': str(settings.BASE_DIR.parent),
+            'candidate_detail': detail,
+            'tried': [str(p) for p in tried],
+        },
+        'H1',
+    )
+    raise CommandError('Source directory does not exist. Tried: ' + ', '.join(str(p) for p in tried))
 
 
 def resolve_ingestion_owner(owner_email: str | None = None):
@@ -56,6 +144,11 @@ def ingest_tax_documents(
 ) -> tuple[int, int, int]:
     source_path = resolve_ingestion_source(source_dir)
     files = list_ingestible_files(source_path)
+    _agent_debug_log(
+        'ingest_tax_documents listed files',
+        {'source_path': str(source_path), 'file_count': len(files), 'suffixes': sorted(SUPPORTED_SUFFIXES)},
+        'H3',
+    )
 
     created_count = 0
     updated_count = 0

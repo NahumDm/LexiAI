@@ -90,10 +90,10 @@ class DocumentIngestionJobSerializer(serializers.ModelSerializer):
 
     def validate_source_dir(self, value):
         try:
-            resolve_ingestion_source(value)
+            resolved = resolve_ingestion_source(value)
         except CommandError as exc:
             raise serializers.ValidationError(str(exc)) from exc
-        return value
+        return str(resolved)
 
     def create(self, validated_data):
         owner_email = validated_data.pop('owner_email', None)
