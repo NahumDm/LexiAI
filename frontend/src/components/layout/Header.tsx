@@ -10,7 +10,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger 
 } from '@/components/ui/dropdown-menu';
-import { User, LogOut, Settings, LayoutDashboard } from 'lucide-react';
+import { User, LogOut, LayoutDashboard } from 'lucide-react';
 
 interface HeaderProps {
   onLoginClick?: () => void;
@@ -74,7 +74,7 @@ export function Header({ onLoginClick, onRegisterClick, variant = 'landing' }: H
                 )}
                 {isAuthenticated && (
                   <DropdownMenuItem asChild>
-                    <Link to="/chat" className="cursor-pointer">
+                    <Link to="/account" className="cursor-pointer">
                       <User className="mr-2 h-4 w-4" />
                       My Account
                     </Link>

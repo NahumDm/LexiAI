@@ -40,15 +40,30 @@ export default function ChatPage() {
 		loadConversation,
 		deleteConversation,
 		sendQuery,
-		addMessage,
 		clearMessages,
 	} = useChat();
 
 	const [localConversations, setLocalConversations] = useState<Conversation[]>([]);
 	const [isLoadingConversations, setIsLoadingConversations] = useState(true);
+	const [guestQuotaNotice, setGuestQuotaNotice] = useState<string | null>(null);
 	const scrollRef = useRef<HTMLDivElement>(null);
 
-	// Load conversations on mount
+	const refreshConversationSidebar = async (conversationId: number) => {
+		try {
+			const convResp = await ChatAPI.getConversation(conversationId);
+			if (convResp.data) {
+				setCurrentConversation(convResp.data);
+				setLocalConversations(prev => {
+					const filtered = prev.filter(c => c.id !== convResp.data!.id);
+					return [convResp.data!, ...filtered];
+				});
+			}
+		} catch (err) {
+			console.warn('Failed to refresh conversation metadata:', err);
+		}
+	};
+
+	// Load conversations when a user session exists (registered users and JWT-backed guests).
 	useEffect(() => {
 		const loadConversations = async () => {
 			try {
@@ -66,13 +81,13 @@ export default function ChatPage() {
 			}
 		};
 
-		if (user && !isGuest) {
+		if (user) {
 			loadConversations();
-		} else if (isGuest) {
+		} else {
 			setLocalConversations([]);
 			setIsLoadingConversations(false);
 		}
-	}, [user, isGuest]);
+	}, [user]);
 
 	// Auto-scroll to bottom on new messages
 	useEffect(() => {
@@ -98,60 +113,37 @@ export default function ChatPage() {
 	};
 
 	const handleCreateAndChat = async (query: string) => {
-		try {
-			// Create conversation with auto-generated title
-			const title = query.slice(0, 40) + (query.length > 40 ? '...' : '');
-
-			const conversation = await createConversation(title);
-			setCurrentConversation(conversation);
-
-			// Send query to the new conversation
-			await handleSendQuery(query);
-		} catch (err) {
-			console.error('Failed to create conversation:', err);
-		}
+		const title = query.slice(0, 40) + (query.length > 40 ? '...' : '');
+		const conversation = await createConversation(title);
+		// Pass conversation.id — React state from createConversation is not visible in this closure yet.
+		await sendQuery(query, 5, conversation.id);
+		await refreshConversationSidebar(conversation.id);
 	};
 
 	const handleSendQuery = async (query: string) => {
-		if (isGuest) {
-			if (!consumeGuestQuery()) {
-				return;
-			}
+		setGuestQuotaNotice(null);
 
-			addMessage(query, 'user');
-			const guestAnswer =
-				'You are in Guest Mode. This is a preview response. Create a free account to get full legal analysis with citations, saved conversations, and document-aware answers.';
-			window.setTimeout(() => {
-				addMessage(guestAnswer, 'assistant', {
-					warnings: ['Guest mode preview response'],
-				});
-			}, 400);
+		if (isGuest && guestQueriesRemaining <= 0) {
+			setGuestQuotaNotice(
+				'You have used all 3 guest queries for this session. Create an account to continue with full document-aware chat.'
+			);
 			return;
 		}
 
 		if (!currentConversation) {
-			// Create new conversation if none exists
-			await handleCreateAndChat(query);
+			try {
+				await handleCreateAndChat(query);
+				if (isGuest) consumeGuestQuery();
+			} catch (err) {
+				console.error('Failed to create conversation or send message:', err);
+			}
 			return;
 		}
 
 		try {
-			const response = await sendQuery(query);
-			// Refresh conversation metadata (last_message_at) and update sidebar
-			try {
-				const convResp = await ChatAPI.getConversation(currentConversation.id);
-				if (convResp.data) {
-					setCurrentConversation(convResp.data);
-					setLocalConversations(prev => {
-						// Replace or insert conversation and move to top
-						const filtered = prev.filter(c => c.id !== convResp.data!.id);
-						return [convResp.data!, ...filtered];
-					});
-				}
-			} catch (err) {
-				console.warn('Failed to refresh conversation metadata:', err);
-			}
-			return response;
+			await sendQuery(query);
+			await refreshConversationSidebar(currentConversation.id);
+			if (isGuest) consumeGuestQuery();
 		} catch (err) {
 			console.error('Failed to send query:', err);
 		}
@@ -194,6 +186,13 @@ export default function ChatPage() {
 						)}
 
 						{/* Error Alert */}
+						{guestQuotaNotice && (
+							<Alert className="m-4 border-warning bg-warning/5">
+								<AlertCircle className="h-4 w-4 text-warning" />
+								<AlertDescription>{guestQuotaNotice}</AlertDescription>
+							</Alert>
+						)}
+
 						{error && (
 							<Alert variant="destructive" className="m-4">
 								<AlertCircle className="h-4 w-4" />
@@ -224,8 +223,9 @@ export default function ChatPage() {
 								))}
 
 								{isSendingQuery && messages[messages.length - 1]?.sender === 'user' && (
-									<div className="flex justify-center py-4">
-										<Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+									<div className="flex flex-col items-center justify-center gap-2 py-4 text-muted-foreground">
+										<Loader2 className="h-6 w-6 animate-spin" />
+										<span className="text-sm">AI is typing…</span>
 									</div>
 								)}
 							</div>

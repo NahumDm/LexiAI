@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import numbers
 
 from django.db.models import Avg, Count
 from django.utils import timezone
@@ -10,30 +11,75 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 
 from ai_engine.models import QueryFeedback, QueryLog
-from ai_engine.serializers import ChatQuerySerializer, ChatResponseSerializer, QueryFeedbackSerializer
+from ai_engine.serializers import ChatQuerySerializer, QueryFeedbackSerializer
 from conversations.models import Conversation
 from conversations.permissions import IsConversationOwner
 
 logger = logging.getLogger(__name__)
 
 
+
+def _json_native(value):
+	"""Recursively convert numpy scalars and odd types to JSON-native Python (DRF 400-safe)."""
+	if value is None:
+		return None
+	if hasattr(value, 'item') and callable(getattr(value, 'item')):
+		try:
+			return _json_native(value.item())
+		except Exception:
+			pass
+	if isinstance(value, dict):
+		return {k: _json_native(v) for k, v in value.items()}
+	if isinstance(value, (list, tuple)):
+		return [_json_native(v) for v in value]
+	if isinstance(value, bool):
+		return value
+	if isinstance(value, numbers.Integral):
+		return int(value)
+	if isinstance(value, numbers.Real):
+		return float(value)
+	return value
+
+
+def _chat_response_to_response_body(chat_response) -> dict:
+	"""Build API JSON dict without failing DRF validation on numpy / edge types."""
+	tu = chat_response.tokens_used or {}
+	return {
+		'answer': '' if chat_response.answer is None else str(chat_response.answer),
+		'sources': _json_native(chat_response.sources or []),
+		'model_used': str(chat_response.model_used),
+		'tokens_used': {
+			'prompt': int(_json_native(tu.get('prompt', 0))),
+			'completion': int(_json_native(tu.get('completion', 0))),
+			'total': int(_json_native(tu.get('total', 0))),
+		},
+		'retrieval_confidence': float(_json_native(chat_response.retrieval_confidence)),
+		'warnings': [str(w) for w in (chat_response.warnings or [])],
+		'query_id': int(chat_response.query_log_id) if chat_response.query_log_id is not None else None,
+	}
+
+
 class ChatAskView(generics.CreateAPIView):
 	"""
-	Chat endpoint that runs the full RAG pipeline.
-	Retrieves relevant chunks and generates a grounded answer.
+	Chat endpoint: grounded RAG when document passages exist, otherwise general chat.
 
 	POST /api/v1/chat/{conversation_id}/ask/
 	{
 		"query": "What are the key clauses?",
 		"top_k": 5
 	}
+
+	Does not require conversation.document; retrieval prefers attached document, else the owner's library.
+	If no chunks match, the LLM answers conversationally (no 400).
 	"""
 	serializer_class = ChatQuerySerializer
 	permission_classes = [permissions.IsAuthenticated, IsConversationOwner]
 
 	def get_conversation(self) -> Conversation:
-		"""Fetch and validate conversation ownership."""
-		conversation = Conversation.objects.get(pk=self.kwargs['conversation_pk'])
+		"""Fetch and validate conversation ownership. Document FK is optional — chat works without it."""
+		conversation = Conversation.objects.select_related('document', 'owner').get(
+			pk=self.kwargs['conversation_pk']
+		)
 		self.check_object_permissions(self.request, conversation)
 		return conversation
 
@@ -53,12 +99,17 @@ class ChatAskView(generics.CreateAPIView):
 				status=status.HTTP_404_NOT_FOUND,
 			)
 
-		if not conversation.document:
-			return Response(
-				{'detail': 'This conversation has no document attached. Attach a document first.'},
-				status=status.HTTP_400_BAD_REQUEST,
-			)
+		# Intentional: never require conversation.document. RAG scopes to attached doc if present,
+		# otherwise RetrievalService falls back to all chunks owned by conversation.owner.
+		doc_pk = getattr(conversation.document, 'pk', None)
+		logger.info(
+			'chat_ask start conversation_id=%s owner_id=%s document_id=%s (optional)',
+			conversation.id,
+			conversation.owner_id,
+			doc_pk,
+		)
 
+		# Conversations may start without a document; retrieval returns no chunks and the LLM still answers.
 		try:
 			from ai_engine.services.rag import RAGPipeline
 
@@ -95,6 +146,7 @@ class ChatAskView(generics.CreateAPIView):
 					'tokens': chat_response.tokens_used,
 					'retrieval_confidence': chat_response.retrieval_confidence,
 					'warnings': chat_response.warnings,
+					'query_log_id': chat_response.query_log_id,
 				},
 			)
 			conversation.last_message_at = assistant_message.created_at
@@ -106,17 +158,8 @@ class ChatAskView(generics.CreateAPIView):
 				chat_response.warnings.append('Failed to persist messages to conversation history')
 			# Do not update conversation.last_message_at when save failed
 
-		response_serializer = ChatResponseSerializer(data={
-			'answer': chat_response.answer,
-			'sources': chat_response.sources,
-			'model_used': chat_response.model_used,
-			'tokens_used': chat_response.tokens_used,
-			'retrieval_confidence': chat_response.retrieval_confidence,
-			'warnings': chat_response.warnings,
-		})
-		response_serializer.is_valid(raise_exception=True)
-
-		return Response(response_serializer.data, status=status.HTTP_200_OK)
+		body = _chat_response_to_response_body(chat_response)
+		return Response(body, status=status.HTTP_200_OK)
 
 
 class ChatFeedbackView(generics.CreateAPIView):

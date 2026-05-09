@@ -115,6 +115,23 @@ export class AuthAPI {
   }
 
   /**
+   * Start an ephemeral guest session (JWT + server-side user). Frontend still tracks guest quota.
+   */
+  static async guestSession(): Promise<ApiResponse<LoginResponse>> {
+    const response = await apiClient.post<LoginResponse>('/auth/guest-session/', {});
+
+    if (response.data?.access) {
+      apiClient.setAuthTokens(response.data.access, response.data.refresh);
+    }
+
+    if (response.data?.user) {
+      response.data.user = normalizeUser(response.data.user as unknown as BackendUser);
+    }
+
+    return response;
+  }
+
+  /**
    * Register new user
    */
   static async register(data: RegisterRequest): Promise<ApiResponse<RegisterResponse>> {
@@ -155,10 +172,17 @@ export class AuthAPI {
   }
 
   /**
-   * Update user profile
+   * Update user profile (`full_name` maps to profile on backend)
    */
-  static async updateProfile(updates: Partial<User>): Promise<ApiResponse<User>> {
-    const response = await apiClient.patch<BackendUser>('/auth/profile/', updates);
+  static async updateProfile(
+    updates: Partial<User> & { full_name?: string }
+  ): Promise<ApiResponse<User>> {
+    const payload: Record<string, unknown> = { ...updates };
+    if (updates.name !== undefined && updates.full_name === undefined) {
+      payload.full_name = updates.name;
+      delete payload.name;
+    }
+    const response = await apiClient.patch<BackendUser>('/auth/profile/', payload);
     if (!response.data) {
       return response as ApiResponse<User>;
     }

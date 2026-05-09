@@ -7,18 +7,19 @@ from ai_engine.models import QueryFeedback
 
 class ChatQuerySerializer(serializers.Serializer):
 	"""Serializer for chat query requests."""
-	query = serializers.CharField(max_length=2000, required=True)
+	query = serializers.CharField(max_length=2000, required=True, allow_blank=True)
 	top_k = serializers.IntegerField(min_value=1, max_value=20, required=False, default=5)
 
 
 class ChatResponseSerializer(serializers.Serializer):
 	"""Serializer for chat responses with confidence and citations."""
-	answer = serializers.CharField()
+	answer = serializers.CharField(allow_blank=True)
 	sources = serializers.ListField()
 	model_used = serializers.CharField()
 	tokens_used = serializers.DictField()
 	retrieval_confidence = serializers.FloatField()
 	warnings = serializers.ListField(required=False, allow_empty=True)
+	query_id = serializers.IntegerField(required=False, allow_null=True, help_text='QueryLog PK for feedback')
 
 
 class QueryFeedbackSerializer(serializers.ModelSerializer):

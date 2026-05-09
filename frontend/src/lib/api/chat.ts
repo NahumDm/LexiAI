@@ -23,6 +23,8 @@ export interface ChatResponse {
   };
   retrieval_confidence: number;
   warnings: string[];
+  /** Backend QueryLog id — required for thumbs feedback */
+  query_id?: number | null;
 }
 
 export interface ChatQueryRequest {

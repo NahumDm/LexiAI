@@ -27,7 +27,16 @@ class ApiClient {
   private isHandlingUnauthorized = false;
 
   constructor() {
-    this.baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
+    const envBase = import.meta.env.VITE_API_BASE_URL as string | undefined;
+    // Dev + no env: use relative /api so Vite proxy hits backend (see vite.config.ts).
+    // Set VITE_API_BASE_URL when you need a fixed host (e.g. Docker-only API URL).
+    if (envBase !== undefined && envBase !== '') {
+      this.baseUrl = envBase.replace(/\/$/, '');
+    } else if (import.meta.env.DEV) {
+      this.baseUrl = '';
+    } else {
+      this.baseUrl = 'http://127.0.0.1:8000';
+    }
     this.apiVersion = import.meta.env.VITE_API_VERSION || 'v1';
   }
 
@@ -92,7 +101,8 @@ class ApiClient {
           return false;
         }
 
-        const response = await fetch(`${this.baseUrl}/api/${this.apiVersion}/auth/refresh/`, {
+        const apiPrefix = this.baseUrl ? `${this.baseUrl}/api/` : `/api/`;
+        const response = await fetch(`${apiPrefix}${this.apiVersion}/auth/refresh/`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -147,23 +157,14 @@ class ApiClient {
     allowHostFallback = true
   ): Promise<ApiResponse<T>> {
     try {
-      const url = endpoint.startsWith('http')
-        ? endpoint
-        : `${this.baseUrl}/api/${this.apiVersion}${endpoint}`;
-
-      // #region agent log
-      fetch('http://127.0.0.1:7247/ingest/bc726661-d383-4043-b18b-3deaa5cf7028',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'c2a3f7'},body:JSON.stringify({sessionId:'c2a3f7',runId:'pre-fix',hypothesisId:'H1',location:'client.ts:request:url-build',message:'API request prepared',data:{endpoint,url,baseUrl:this.baseUrl,apiVersion:this.apiVersion,method:options.method||'GET',hasAuthHeader:Boolean(this.getToken())},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
+      const prefix = this.baseUrl ? `${this.baseUrl}/api/` : `/api/`;
+      const url = endpoint.startsWith('http') ? endpoint : `${prefix}${this.apiVersion}${endpoint}`;
 
       const response = await fetch(url, {
         ...options,
         headers: this.buildHeaders(options),
         credentials: 'include', // Include cookies in request
       });
-
-      // #region agent log
-      fetch('http://127.0.0.1:7247/ingest/bc726661-d383-4043-b18b-3deaa5cf7028',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'c2a3f7'},body:JSON.stringify({sessionId:'c2a3f7',runId:'pre-fix',hypothesisId:'H3',location:'client.ts:request:response',message:'API response received',data:{endpoint,url,status:response.status,ok:response.ok},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
 
       // Handle 401 - attempt token refresh
       if (response.status === 401 && retryCount < maxRetries) {
@@ -200,9 +201,16 @@ class ApiClient {
 
       // Non-OK responses
       if (!response.ok) {
+        let fallback = typeof data?.detail === 'string' ? data.detail : '';
+        if (!fallback && data && typeof data === 'object' && !Array.isArray(data)) {
+          const msgs = Object.entries(data as Record<string, unknown>).flatMap(([field, msgs]) =>
+            Array.isArray(msgs) ? msgs.map((m) => `${field}: ${m}` as string) : [`${field}: ${String(msgs)}`]
+          );
+          if (msgs.length) fallback = msgs.join('; ');
+        }
         return {
           status: response.status,
-          error: data?.detail || data?.error || data?.message || 'Request failed',
+          error: fallback || data?.error || data?.message || 'Request failed',
           data,
         };
       }
@@ -214,7 +222,7 @@ class ApiClient {
     } catch (error) {
       // Retry once with alternate localhost host representation.
       // Some Windows/network setups resolve localhost inconsistently for browser fetch.
-      if (allowHostFallback && !endpoint.startsWith('http')) {
+      if (allowHostFallback && !endpoint.startsWith('http') && this.baseUrl) {
         const originalBaseUrl = this.baseUrl;
         const alternateBaseUrl = this.baseUrl.includes('localhost')
           ? this.baseUrl.replace('localhost', '127.0.0.1')
@@ -233,14 +241,17 @@ class ApiClient {
       }
 
       console.error(`API request failed: ${endpoint}`, error);
-      // #region agent log
-      fetch('http://127.0.0.1:7247/ingest/bc726661-d383-4043-b18b-3deaa5cf7028',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'c2a3f7'},body:JSON.stringify({sessionId:'c2a3f7',runId:'pre-fix',hypothesisId:'H2',location:'client.ts:request:catch',message:'API request threw before response',data:{endpoint,baseUrl:this.baseUrl,errorName:error instanceof Error?error.name:'unknown',errorMessage:error instanceof Error?error.message:'unknown'},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
-      const isNetworkFailure = error instanceof TypeError && error.message.toLowerCase().includes('fetch');
+      const msg = error instanceof Error ? error.message.toLowerCase() : '';
+      const isNetworkFailure =
+        (error instanceof TypeError && msg.includes('fetch')) ||
+        msg.includes('failed to fetch') ||
+        msg.includes('networkerror');
+      const target =
+        this.baseUrl || '(Vite proxy → ensure Django at http://127.0.0.1:8000)';
       return {
         status: 0,
         error: isNetworkFailure
-          ? `Unable to reach API at ${this.baseUrl}. Please ensure backend is running and CORS is configured.`
+          ? `Unable to reach API (${target}). Start the Django server (e.g. runserver or docker compose web). If dev uses proxy, backend must listen on port 8000.`
           : error instanceof Error
             ? error.message
             : 'Network error',

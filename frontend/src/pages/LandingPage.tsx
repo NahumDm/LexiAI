@@ -26,9 +26,13 @@ export default function LandingPage() {
     }
   }, [user, navigate]);
 
-  const handleGuestClick = () => {
-    continueAsGuest();
-    navigate('/chat');
+  const handleGuestClick = async () => {
+    try {
+      await continueAsGuest();
+      navigate('/chat');
+    } catch {
+      // AuthContext sets error; stay on landing page
+    }
   };
 
   return (

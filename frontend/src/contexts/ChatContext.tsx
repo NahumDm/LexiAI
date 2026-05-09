@@ -21,8 +21,8 @@ export interface ChatContextType {
   loadConversation: (id: number) => Promise<void>;
   deleteConversation: (id: number) => Promise<void>;
   
-  // Message management
-  sendQuery: (query: string, topK?: number) => Promise<ChatResponse | null>;
+  // Message management — pass conversationId when React state is stale right after createConversation
+  sendQuery: (query: string, topK?: number, conversationId?: number) => Promise<ChatResponse | null>;
   addMessage: (content: string, role: 'user' | 'assistant', metadata?: any) => void;
   clearMessages: () => void;
   
@@ -116,8 +116,9 @@ export const ChatProvider = ({ children }: { children: ReactNode }) => {
   }, [currentConversation?.id]);
 
   const handleSendQuery = useCallback(
-    async (query: string, topK = 5): Promise<ChatResponse | null> => {
-      if (!currentConversation) {
+    async (query: string, topK = 5, conversationId?: number): Promise<ChatResponse | null> => {
+      const targetId = conversationId ?? currentConversation?.id;
+      if (!targetId) {
         setError('No conversation selected');
         return null;
       }
@@ -136,12 +137,13 @@ export const ChatProvider = ({ children }: { children: ReactNode }) => {
         setMessages(prev => [...prev, userMessage]);
 
         // Send query to backend
-        const response = await ChatAPI.sendQuery(currentConversation.id, {
+        const response = await ChatAPI.sendQuery(targetId, {
           query,
           top_k: topK,
         });
 
-        if (!response.data) {
+        const statusOk = typeof response.status === 'number' && response.status >= 200 && response.status < 300;
+        if (!statusOk || !response.data || typeof response.data !== 'object' || typeof response.data.answer !== 'string') {
           throw new Error(response.error || 'Failed to get response');
         }
 
@@ -149,7 +151,7 @@ export const ChatProvider = ({ children }: { children: ReactNode }) => {
         const assistantMessage = {
           id: Date.now() + 1,
           sender: 'assistant' as const,
-          content: response.data.answer,
+          content: response.data.answer ?? '',
           created_at: new Date().toISOString(),
           metadata: {
             sources: response.data.sources,
@@ -157,6 +159,7 @@ export const ChatProvider = ({ children }: { children: ReactNode }) => {
             tokens: response.data.tokens_used,
             retrieval_confidence: response.data.retrieval_confidence,
             warnings: response.data.warnings,
+            query_log_id: response.data.query_id ?? undefined,
           },
         };
         setMessages(prev => [...prev, assistantMessage]);

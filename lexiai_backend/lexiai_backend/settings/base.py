@@ -231,6 +231,15 @@ REFERRER_POLICY = 'same-origin'
 FILE_UPLOAD_MAX_MEMORY_SIZE = env_int('FILE_UPLOAD_MAX_MEMORY_SIZE', 50 * 1024 * 1024)
 DATA_UPLOAD_MAX_MEMORY_SIZE = env_int('DATA_UPLOAD_MAX_MEMORY_SIZE', 50 * 1024 * 1024)
 
+# --- AI / RAG ---
+# AI_LLM_BACKEND: auto | stub | mistral
+# auto: use Mistral/OpenAI-compatible client if MISTRAL_API_KEY or MISTRAL_BASE_URL is set; else stub.
+AI_LLM_BACKEND = env('AI_LLM_BACKEND', 'auto').strip().lower()
+MISTRAL_API_KEY = env('MISTRAL_API_KEY', '')
+MISTRAL_BASE_URL = env('MISTRAL_BASE_URL', '')
+MISTRAL_MODEL = env('MISTRAL_MODEL', 'mistral-7b-instruct')
+MISTRAL_TEMPERATURE = float(env('MISTRAL_TEMPERATURE', '0.7'))
+
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
