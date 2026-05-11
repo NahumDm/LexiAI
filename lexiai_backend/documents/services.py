@@ -193,6 +193,15 @@ def ingest_tax_documents(
 
         document.source_file.save(path.name, ContentFile(path.read_bytes()), save=True)
 
+        # Trigger asynchronous embedding job AFTER the document is committed.
+        # Import inside the function to avoid circular imports in module scope.
+        if document.extracted_text and document.extracted_text.strip():
+            from django.db import transaction
+            from ai_engine.tasks import embed_document_chunks
+
+            doc_pk = document.pk
+            transaction.on_commit(lambda pk=doc_pk: embed_document_chunks.delay(pk))
+
     return len(files), created_count, updated_count
 
 
