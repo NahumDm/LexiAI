@@ -11,7 +11,13 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 
 from ai_engine.models import QueryFeedback, QueryLog
-from ai_engine.serializers import ChatQuerySerializer, QueryFeedbackSerializer
+from ai_engine.serializers import (
+	AskQuerySerializer,
+	AskResponseSerializer,
+	ChatQuerySerializer,
+	QueryFeedbackSerializer,
+)
+from ai_engine.services.qa import generate_answer
 from conversations.models import Conversation
 from conversations.permissions import IsConversationOwner
 
@@ -160,6 +166,99 @@ class ChatAskView(generics.CreateAPIView):
 
 		body = _chat_response_to_response_body(chat_response)
 		return Response(body, status=status.HTTP_200_OK)
+
+
+_ASK_RATE_WINDOW_SECONDS = 60
+
+
+def _record_ask_call(user_id: int) -> int:
+	"""Best-effort per-user request counter over the last 60s.
+
+	Uses Django's cache (LocMem in dev, Redis in prod when REDIS_URL is set).
+	Any cache failure is swallowed and reported as ``0`` so the request flow is
+	never blocked. Layer DRF's ``UserRateThrottle`` on top for actual rate
+	limiting; this helper is purely an observability counter.
+	"""
+	try:
+		from django.core.cache import cache
+
+		key = f'ask:rate:{user_id}'
+		count = cache.get(key) or 0
+		count = int(count) + 1
+		cache.set(key, count, timeout=_ASK_RATE_WINDOW_SECONDS)
+		return count
+	except Exception as exc:
+		logger.warning('ask: rate counter unavailable: %s', exc)
+		return 0
+
+
+class AskView(generics.GenericAPIView):
+	"""
+	Stateless retrieval-augmented Q&A over the caller's document library.
+
+	POST /api/v1/ask/
+	{
+		"query": "What does the Commercial Code say about partnerships?",
+		"top_k": 5,                # optional, 1..20, default 5
+		"min_similarity": 0.0      # optional, 0.0..1.0, default 0.0
+	}
+
+	Response 200:
+	{
+		"answer": "...",
+		"sources": [{"source_number": 1, "chunk_id": 42, ...}, ...],
+		"model_used": "mistral-7b-instruct",
+		"retrieval_confidence": 0.71,
+		"latency_ms": 1842,
+		"warnings": [],
+		"query_log_id": 17
+	}
+
+	Differs from ``ChatAskView`` (which is scoped to a Conversation and writes
+	turn-by-turn ``ConversationMessage`` rows) by being entirely stateless and
+	library-wide. Useful for one-shot Q&A, evaluation harnesses, and external
+	integrations.
+	"""
+	serializer_class = AskQuerySerializer
+	permission_classes = [permissions.IsAuthenticated]
+
+	@staticmethod
+	def get_response_serializer():
+		return AskResponseSerializer
+
+	def post(self, request, *args, **kwargs):
+		serializer = self.get_serializer(data=request.data)
+		serializer.is_valid(raise_exception=True)
+
+		query = serializer.validated_data['query']
+		top_k = serializer.validated_data.get('top_k', 5)
+		min_similarity = serializer.validated_data.get('min_similarity', 0.0)
+
+		recent_count = _record_ask_call(request.user.id)
+		logger.info(
+			'ask: user_id=%s query_chars=%s top_k=%s min_similarity=%s recent_60s=%s',
+			request.user.id,
+			len(query),
+			top_k,
+			min_similarity,
+			recent_count,
+		)
+
+		try:
+			result = generate_answer(
+				query=query,
+				user=request.user,
+				top_k=top_k,
+				min_similarity=min_similarity,
+			)
+		except Exception as exc:
+			logger.exception('ask: generate_answer failed: %s', exc)
+			return Response(
+				{'detail': 'An internal error occurred while processing the request.'},
+				status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+			)
+
+		return Response(result, status=status.HTTP_200_OK)
 
 
 class ChatFeedbackView(generics.CreateAPIView):

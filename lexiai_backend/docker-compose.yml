@@ -27,7 +27,7 @@ services:
     working_dir: /app/lexiai_backend
     command: >
       sh -c "python manage.py migrate --noinput &&
-      gunicorn lexiai_backend.wsgi:application --bind 0.0.0.0:8000 --workers 3"
+      gunicorn lexiai_backend.wsgi:application --bind 0.0.0.0:8000 --workers 3 --timeout 120"
     env_file:
       - .env
     environment:

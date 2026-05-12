@@ -4,17 +4,21 @@ from pathlib import Path
 
 from django.core.management.base import BaseCommand
 
-from documents.services import build_document_title, ingest_tax_documents, resolve_ingestion_owner
+from documents.services import build_document_title, ingest_documents, resolve_ingestion_owner
 
 
 class Command(BaseCommand):
-    help = 'Ingest documents from the tax_doc directory into Document records.'
+    help = (
+        'Ingest documents from a directory into Document records. '
+        'Generic ingestion command (kept for backward compatibility). '
+        'Prefer the newer "ingest_docs" command for new workflows.'
+    )
 
     def add_arguments(self, parser):
         parser.add_argument(
             '--source-dir',
             default='tax_doc',
-            help='Relative or absolute path to the directory containing tax documents.',
+            help='Relative or absolute path to the directory containing documents to ingest.',
         )
         parser.add_argument(
             '--owner-email',
@@ -29,7 +33,7 @@ class Command(BaseCommand):
         def on_file_progress(path: Path, index: int, total: int) -> None:
             self.stdout.write(f'Importing {build_document_title(path)} ({index}/{total})...')
 
-        total_files, created_count, updated_count = ingest_tax_documents(
+        total_files, created_count, updated_count = ingest_documents(
             source_dir,
             owner,
             on_file_progress=on_file_progress,

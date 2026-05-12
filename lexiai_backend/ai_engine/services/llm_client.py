@@ -13,6 +13,37 @@ logger = logging.getLogger(__name__)
 
 CONFIDENCE_THRESHOLD = 0.35
 
+# Common placeholder values that indicate "no real key configured yet". Treated as missing.
+_PLACEHOLDER_KEYS = frozenset({
+	'your_api_key_here',
+	'your-api-key-here',
+	'change-me',
+	'changeme',
+	'<your_key>',
+	'<your-key>',
+	'todo',
+	'xxx',
+})
+
+
+class LLMError(RuntimeError):
+	"""Raised when the underlying LLM provider fails or is misconfigured.
+
+	Defined here (the more fundamental module) so both ``llm_client.py`` and
+	``llm.py`` can raise the same exception without a circular import.
+	``ai_engine.services.llm`` re-exports it for backward compatibility.
+	"""
+
+
+def _is_real_secret(value: str | None) -> bool:
+	"""Return True only when ``value`` looks like a real provider credential."""
+	if not value:
+		return False
+	stripped = value.strip()
+	if not stripped:
+		return False
+	return stripped.lower() not in _PLACEHOLDER_KEYS
+
 
 @dataclass
 class ChatResponse:
@@ -133,15 +164,18 @@ class MistralLLMClient(LLMClient):
 		self,
 		api_key: str | None = None,
 		base_url: str | None = None,
-		temperature: float = 0.7,
+		temperature: float = 0.2,
 		model: str | None = None,
+		max_tokens: int = 1024,
+		timeout_seconds: int = 60,
 	):
 		self.api_key = api_key
 		self.base_url = base_url or 'http://localhost:8000/v1'
 		self.temperature = temperature
-		self.model = model or 'mistral-7b-instruct'
+		self.model = model or 'mistral-medium-3.5'
+		self.max_tokens = max_tokens
 		self.client = None
-		self.timeout = 120
+		self.timeout = timeout_seconds
 		self._init_lock = threading.RLock()
 
 	def _initialize(self) -> None:
@@ -190,17 +224,30 @@ class MistralLLMClient(LLMClient):
 		}
 
 	def _chat(self, system_prompt: str, user_prompt: str) -> tuple[str, dict[str, int]]:
+		"""Invoke the OpenAI-compatible chat endpoint.
+
+		Any provider/transport failure (network, 401, 429, 5xx, timeout) is
+		re-raised as :class:`LLMError` so callers handle a single exception
+		type instead of leaking provider SDK internals.
+		"""
 		self._ensure_client()
-		response = self.client.chat.completions.create(
-			model=self.model,
-			temperature=self.temperature,
-			max_tokens=1200,
-			messages=[
-				{'role': 'system', 'content': system_prompt},
-				{'role': 'user', 'content': user_prompt},
-			],
-			timeout=self.timeout,
-		)
+		try:
+			response = self.client.chat.completions.create(
+				model=self.model,
+				temperature=self.temperature,
+				max_tokens=self.max_tokens,
+				messages=[
+					{'role': 'system', 'content': system_prompt},
+					{'role': 'user', 'content': user_prompt},
+				],
+				timeout=self.timeout,
+			)
+		except LLMError:
+			raise
+		except Exception as exc:
+			logger.exception('LLM request failed model=%s: %s', self.model, exc)
+			raise LLMError(f'LLM request failed: {exc}') from exc
+
 		text = (response.choices[0].message.content or '').strip()
 		return text, self._usage_tokens(response)
 
@@ -287,48 +334,115 @@ class MistralLLMClient(LLMClient):
 			raise
 
 
-def get_llm_client() -> LLMClient:
-	"""
-	Select LLM implementation from Django settings.
+_SUPPORTED_BACKENDS = frozenset({'auto', 'stub', 'mistral', 'openai', 'openai_compatible'})
 
-	Environment / settings:
-	- AI_LLM_BACKEND: auto | stub | mistral
-	- MISTRAL_API_KEY: Mistral AI cloud (OpenAI-compatible endpoint)
-	- MISTRAL_BASE_URL: local vLLM / Ollama OpenAI server (e.g. http://localhost:11434/v1)
-	- MISTRAL_MODEL: model id served at that endpoint
+
+def _build_mistral_client(
+	*,
+	api_key: str | None,
+	base_url: str | None,
+	model: str,
+	temperature: float,
+	max_tokens: int,
+	timeout_seconds: int,
+) -> MistralLLMClient:
+	client = MistralLLMClient(
+		api_key=api_key or None,
+		base_url=base_url or 'http://localhost:8000/v1',
+		temperature=temperature,
+		model=model,
+		max_tokens=max_tokens,
+		timeout_seconds=timeout_seconds,
+	)
+	logger.info(
+		'LLM: MistralLLMClient model=%s temperature=%s max_tokens=%s timeout=%ss (api_key=%s base_url=%s)',
+		model,
+		temperature,
+		max_tokens,
+		timeout_seconds,
+		'yes' if api_key else 'no',
+		base_url or '(default local)',
+	)
+	return client
+
+
+def get_llm_client() -> LLMClient:
+	"""Resolve and return the configured LLM backend.
+
+	Reads Django settings:
+		- ``AI_LLM_BACKEND``           — ``auto`` | ``stub`` | ``mistral``
+		- ``MISTRAL_API_KEY``          — Mistral cloud key (OpenAI-compatible)
+		- ``MISTRAL_BASE_URL``         — alternative OpenAI-compatible endpoint
+		                                  (local vLLM / Ollama / etc.)
+		- ``MISTRAL_MODEL``            — model id at that endpoint
+		- ``MISTRAL_TEMPERATURE``      — sampling temperature (default 0.2 for RAG)
+		- ``MISTRAL_MAX_TOKENS``       — completion length cap
+		- ``MISTRAL_TIMEOUT_SECONDS``  — per-request timeout
+
+	Resolution rules:
+		- ``mistral`` with real credentials → ``MistralLLMClient``
+		- ``mistral`` without credentials  → fall back to ``StubLLMClient``
+		  with a warning ("never crash the request because of config drift")
+		- ``stub``                         → ``StubLLMClient``
+		- ``auto``                         → ``MistralLLMClient`` if creds are
+		  present, otherwise ``StubLLMClient``
+		- any other value                  → :class:`LLMError`
 	"""
 	from django.conf import settings
 
-	backend = getattr(settings, 'AI_LLM_BACKEND', 'auto').strip().lower()
+	backend = (getattr(settings, 'AI_LLM_BACKEND', 'auto') or 'auto').strip().lower()
 	api_key = (getattr(settings, 'MISTRAL_API_KEY', '') or '').strip()
 	base_url = (getattr(settings, 'MISTRAL_BASE_URL', '') or '').strip()
-	model = getattr(settings, 'MISTRAL_MODEL', 'mistral-7b-instruct')
-	temperature = float(getattr(settings, 'MISTRAL_TEMPERATURE', 0.7))
+	model = getattr(settings, 'MISTRAL_MODEL', 'mistral-medium-3.5')
+	temperature = float(getattr(settings, 'MISTRAL_TEMPERATURE', 0.2))
+	max_tokens = int(getattr(settings, 'MISTRAL_MAX_TOKENS', 1024))
+	timeout_seconds = int(getattr(settings, 'MISTRAL_TIMEOUT_SECONDS', 60))
+
+	if backend not in _SUPPORTED_BACKENDS:
+		raise LLMError(
+			f'Unsupported AI_LLM_BACKEND={backend!r}. '
+			f'Allowed values: {sorted(_SUPPORTED_BACKENDS)}'
+		)
+
+	has_real_creds = _is_real_secret(api_key) or _is_real_secret(base_url)
 
 	if backend == 'stub':
-		logger.warning('AI_LLM_BACKEND=stub — non-semantic stub responses; set mistral + credentials for production.')
+		logger.warning('AI_LLM_BACKEND=stub — using StubLLMClient (non-semantic). Set AI_LLM_BACKEND=mistral for production.')
 		return StubLLMClient()
 
-	use_mistral = backend in {'mistral', 'openai', 'openai_compatible'}
-	if backend == 'auto':
-		use_mistral = bool(api_key) or bool(base_url)
+	if backend in {'mistral', 'openai', 'openai_compatible'}:
+		if has_real_creds:
+			return _build_mistral_client(
+				api_key=api_key if _is_real_secret(api_key) else None,
+				base_url=base_url if _is_real_secret(base_url) else None,
+				model=model,
+				temperature=temperature,
+				max_tokens=max_tokens,
+				timeout_seconds=timeout_seconds,
+			)
+		# Explicit mistral selection but no usable credentials = production
+		# misconfiguration. Surface at ERROR level so it lights up dashboards,
+		# but DO NOT crash — degrade to stub so the app stays available.
+		logger.error(
+			'AI_LLM_BACKEND=mistral but no real credentials found '
+			'(MISTRAL_API_KEY/MISTRAL_BASE_URL empty or placeholder). '
+			'Falling back to StubLLMClient — set a real key to enable production answers.'
+		)
+		return StubLLMClient()
 
-	if use_mistral:
-		client = MistralLLMClient(
-			api_key=api_key or None,
-			base_url=base_url or 'http://localhost:8000/v1',
-			temperature=temperature,
+	# backend == 'auto'
+	if has_real_creds:
+		return _build_mistral_client(
+			api_key=api_key if _is_real_secret(api_key) else None,
+			base_url=base_url if _is_real_secret(base_url) else None,
 			model=model,
+			temperature=temperature,
+			max_tokens=max_tokens,
+			timeout_seconds=timeout_seconds,
 		)
-		logger.info(
-			'LLM: MistralLLMClient model=%s (api_key=%s base_url=%s)',
-			model,
-			'yes' if api_key else 'no',
-			base_url or '(default local)',
-		)
-		return client
 
 	logger.warning(
-		'No LLM credentials configured — using StubLLMClient. Set MISTRAL_API_KEY and/or MISTRAL_BASE_URL.'
+		'AI_LLM_BACKEND=auto and no LLM credentials configured — using StubLLMClient. '
+		'Set MISTRAL_API_KEY (or MISTRAL_BASE_URL) to enable real inference.'
 	)
 	return StubLLMClient()

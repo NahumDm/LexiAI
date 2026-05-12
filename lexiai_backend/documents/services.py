@@ -134,7 +134,65 @@ def list_ingestible_files(source_dir: Path) -> list[Path]:
     ]
 
 
-def ingest_tax_documents(
+def _validate_ingestible_file(path: Path) -> Path:
+    """Validate a single ingestion target. Returns the resolved absolute path."""
+    resolved = path.resolve()
+    if not resolved.exists():
+        raise CommandError(f'File does not exist: {resolved}')
+    if not resolved.is_file():
+        raise CommandError(f'Path is not a regular file: {resolved}')
+    suffix = resolved.suffix.lower()
+    if suffix not in SUPPORTED_SUFFIXES:
+        raise CommandError(
+            f'Unsupported file type "{suffix}" for {resolved.name}. '
+            f'Supported: {", ".join(sorted(SUPPORTED_SUFFIXES))}'
+        )
+    return resolved
+
+
+def _ingest_file_into_document(
+    path: Path,
+    owner,
+    *,
+    source_path: Path | None = None,
+):
+    """
+    Single-file ingestion primitive shared by directory and single-file ingestion.
+
+    Extracts text, upserts the Document, persists the source file, and queues
+    the embedding task on transaction commit. Returns (document, created).
+    """
+    content = extract_document_text(path)
+    relative_source = (
+        str(path.relative_to(source_path)) if source_path is not None else path.name
+    )
+    document, created = Document.objects.update_or_create(
+        owner=owner,
+        title=build_document_title(path),
+        defaults={
+            'description': f'Imported from {path.name}',
+            'extracted_text': content,
+            'analysis_summary': '',
+            'status': Document.Status.READY,
+            'metadata': {'source_path': relative_source},
+        },
+    )
+
+    document.source_file.save(path.name, ContentFile(path.read_bytes()), save=True)
+
+    # Trigger asynchronous embedding job AFTER the document is committed.
+    # Import inside the function to avoid circular imports in module scope.
+    if document.extracted_text and document.extracted_text.strip():
+        from django.db import transaction
+        from ai_engine.tasks import embed_document_chunks
+
+        doc_pk = document.pk
+        transaction.on_commit(lambda pk=doc_pk: embed_document_chunks.delay(pk))
+
+    return document, created
+
+
+def ingest_documents(
     source_dir: str | Path,
     owner,
     *,
@@ -142,10 +200,20 @@ def ingest_tax_documents(
     on_file_progress: ProgressCallback | None = None,
     job=None,
 ) -> tuple[int, int, int]:
+    """
+    Ingests all supported documents from a directory.
+
+    Walks ``source_dir`` recursively, processes every file whose suffix is in
+    ``SUPPORTED_SUFFIXES`` (.txt, .md, .rtf, .csv, .json, .pdf), upserts a
+    ``Document`` per file, copies the source bytes into media storage, and
+    queues an asynchronous embedding task per document.
+
+    Returns ``(total_files, created_count, updated_count)``.
+    """
     source_path = resolve_ingestion_source(source_dir)
     files = list_ingestible_files(source_path)
     _agent_debug_log(
-        'ingest_tax_documents listed files',
+        'ingest_documents listed files',
         {'source_path': str(source_path), 'file_count': len(files), 'suffixes': sorted(SUPPORTED_SUFFIXES)},
         'H3',
     )
@@ -166,17 +234,8 @@ def ingest_tax_documents(
         if on_file_progress is not None:
             on_file_progress(path, index, len(files))
 
-        content = extract_document_text(path)
-        document, created = Document.objects.update_or_create(
-            owner=owner,
-            title=build_document_title(path),
-            defaults={
-                'description': f'Imported from {path.name}',
-                'extracted_text': content,
-                'analysis_summary': '',
-                'status': Document.Status.READY,
-                'metadata': {'source_path': str(path.relative_to(source_path))},
-            },
+        _document, created = _ingest_file_into_document(
+            path, owner, source_path=source_path
         )
 
         if created:
@@ -191,18 +250,56 @@ def ingest_tax_documents(
             job.current_file_name = path.name
             job.save(update_fields=['processed_files', 'created_documents', 'updated_documents', 'current_file_name', 'updated_at'])
 
-        document.source_file.save(path.name, ContentFile(path.read_bytes()), save=True)
-
-        # Trigger asynchronous embedding job AFTER the document is committed.
-        # Import inside the function to avoid circular imports in module scope.
-        if document.extracted_text and document.extracted_text.strip():
-            from django.db import transaction
-            from ai_engine.tasks import embed_document_chunks
-
-            doc_pk = document.pk
-            transaction.on_commit(lambda pk=doc_pk: embed_document_chunks.delay(pk))
-
     return len(files), created_count, updated_count
+
+
+def ingest_single_document(
+    file_path: str | Path,
+    owner,
+    *,
+    job=None,
+):
+    """
+    Ingest a single document file.
+
+    - Validates the file exists and has a supported suffix.
+    - Extracts text (PDF via pdfplumber/pypdf; plain text otherwise).
+    - Creates or updates the corresponding Document.
+    - Triggers embedding via ``transaction.on_commit``.
+
+    Returns ``(document, created)``.
+    """
+    resolved = _validate_ingestible_file(Path(file_path))
+
+    if job is not None:
+        job.total_files = 1
+        job.processed_files = 0
+        job.created_documents = 0
+        job.updated_documents = 0
+        job.current_file_name = resolved.name
+        job.save(update_fields=['total_files', 'processed_files', 'created_documents', 'updated_documents', 'current_file_name', 'updated_at'])
+
+    document, created = _ingest_file_into_document(resolved, owner)
+
+    if job is not None:
+        job.processed_files = 1
+        job.created_documents = 1 if created else 0
+        job.updated_documents = 0 if created else 1
+        job.current_file_name = resolved.name
+        job.save(update_fields=['processed_files', 'created_documents', 'updated_documents', 'current_file_name', 'updated_at'])
+
+    _agent_debug_log(
+        'ingest_single_document done',
+        {'path': str(resolved), 'document_id': document.pk, 'created': created},
+        'H3',
+    )
+    return document, created
+
+
+# --- Backward-compatible alias ---------------------------------------------
+# Older code, management commands, or scripts that imported ``ingest_tax_documents``
+# continue to work. Prefer ``ingest_documents`` for new code.
+ingest_tax_documents = ingest_documents
 
 
 def build_document_title(path: Path) -> str:

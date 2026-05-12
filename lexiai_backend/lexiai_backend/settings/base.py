@@ -80,6 +80,46 @@ SECRET_KEY = env('SECRET_KEY', 'dev-unsafe-secret-key-change-me')
 DEBUG = env_bool('DEBUG', False)
 ALLOWED_HOSTS = env_list('ALLOWED_HOSTS', ['localhost', '127.0.0.1', 'web'])
 
+# Minimum acceptable SECRET_KEY length (bytes) and known-weak markers.
+_MIN_SECRET_KEY_LENGTH = 32
+_WEAK_SECRET_MARKERS = (
+    'dev-unsafe',
+    'change-me',
+    'changeme',
+    'test-secret',
+    'insecure',
+    'your-secret-here',
+)
+
+
+def _secret_key_is_weak(value: str) -> bool:
+    """Heuristic check for obviously insecure SECRET_KEY values.
+
+    Triggers when the key is shorter than ``_MIN_SECRET_KEY_LENGTH`` characters
+    or contains any of the well-known placeholder markers. Heuristic, not a
+    cryptographic guarantee — pair with key rotation + secret scanning.
+    """
+    if not value or len(value) < _MIN_SECRET_KEY_LENGTH:
+        return True
+    lowered = value.lower()
+    return any(marker in lowered for marker in _WEAK_SECRET_MARKERS)
+
+
+# Surface a weak SECRET_KEY at ERROR level in production. We *log* rather than
+# raise so a running service does not crash on misconfiguration alone — but the
+# noise will be unmissable in Sentry / Loki / CloudWatch. ``prod.py`` already
+# additionally raises if SECRET_KEY is missing entirely; this catches "present
+# but unsafe".
+if not DEBUG and _secret_key_is_weak(SECRET_KEY):
+    import logging as _logging
+    _logging.getLogger(__name__).error(
+        'SECRET_KEY is weak or default (length=%s). Production deployments '
+        'MUST set SECRET_KEY to a high-entropy value >=%s chars. Generate with: '
+        'python -c "import secrets; print(secrets.token_urlsafe(64))"',
+        len(SECRET_KEY or ''),
+        _MIN_SECRET_KEY_LENGTH,
+    )
+
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
@@ -234,11 +274,21 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = env_int('DATA_UPLOAD_MAX_MEMORY_SIZE', 50 * 1024 *
 # --- AI / RAG ---
 # AI_LLM_BACKEND: auto | stub | mistral
 # auto: use Mistral/OpenAI-compatible client if MISTRAL_API_KEY or MISTRAL_BASE_URL is set; else stub.
+# mistral: force Mistral client (falls back to stub with a warning if no credentials are available).
+# stub: force in-process StubLLMClient (offline / testing).
 AI_LLM_BACKEND = env('AI_LLM_BACKEND', 'auto').strip().lower()
 MISTRAL_API_KEY = env('MISTRAL_API_KEY', '')
 MISTRAL_BASE_URL = env('MISTRAL_BASE_URL', '')
-MISTRAL_MODEL = env('MISTRAL_MODEL', 'mistral-7b-instruct')
-MISTRAL_TEMPERATURE = float(env('MISTRAL_TEMPERATURE', '0.7'))
+MISTRAL_MODEL = env('MISTRAL_MODEL', 'mistral-medium-3.5')
+# Low temperature is the right default for grounded RAG answers — keeps the model
+# faithful to the retrieved context rather than improvising.
+MISTRAL_TEMPERATURE = float(env('MISTRAL_TEMPERATURE', '0.2'))
+MISTRAL_MAX_TOKENS = env_int('MISTRAL_MAX_TOKENS', 1024)
+MISTRAL_TIMEOUT_SECONDS = env_int('MISTRAL_TIMEOUT_SECONDS', 60)
+
+# When True, ai_engine.apps.AiEngineConfig.ready() warms the embedding model
+# in a daemon thread. Keep off for management commands; on for server processes.
+AI_WARMUP_ON_STARTUP = env_bool('AI_WARMUP_ON_STARTUP', False)
 
 LOGGING = {
     'version': 1,
