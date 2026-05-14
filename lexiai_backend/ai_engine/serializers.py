@@ -8,7 +8,8 @@ from ai_engine.models import QueryFeedback, QueryLog
 class ChatQuerySerializer(serializers.Serializer):
 	"""Serializer for chat query requests."""
 	query = serializers.CharField(max_length=2000, required=True, allow_blank=True)
-	top_k = serializers.IntegerField(min_value=1, max_value=20, required=False, default=5)
+	top_k = serializers.IntegerField(min_value=1, max_value=20, required=False, default=3)
+	min_similarity = serializers.FloatField(min_value=0.0, max_value=1.0, required=False, default=0.2)
 
 
 class ChatResponseSerializer(serializers.Serializer):
@@ -18,6 +19,8 @@ class ChatResponseSerializer(serializers.Serializer):
 	model_used = serializers.CharField()
 	tokens_used = serializers.DictField()
 	retrieval_confidence = serializers.FloatField()
+	confidence = serializers.FloatField()
+	confidence_percent = serializers.FloatField(required=False)
 	warnings = serializers.ListField(required=False, allow_empty=True)
 	query_id = serializers.IntegerField(required=False, allow_null=True, help_text='QueryLog PK for feedback')
 
@@ -31,8 +34,8 @@ class AskQuerySerializer(serializers.Serializer):
 	query = serializers.CharField(max_length=2000, required=True, allow_blank=False, trim_whitespace=True)
 	# Capped at 10 to limit per-request LLM token cost (context length scales
 	# linearly with k) and to keep retrieval latency predictable.
-	top_k = serializers.IntegerField(min_value=1, max_value=10, required=False, default=5)
-	min_similarity = serializers.FloatField(min_value=0.0, max_value=1.0, required=False, default=0.0)
+	top_k = serializers.IntegerField(min_value=1, max_value=10, required=False, default=3)
+	min_similarity = serializers.FloatField(min_value=0.0, max_value=1.0, required=False, default=0.2)
 
 
 class AskSourceSerializer(serializers.Serializer):
@@ -51,6 +54,10 @@ class AskResponseSerializer(serializers.Serializer):
 	sources = AskSourceSerializer(many=True)
 	model_used = serializers.CharField()
 	retrieval_confidence = serializers.FloatField()
+	confidence = serializers.FloatField(
+		help_text='Max cosine among passages used for the answer, or routing score when no LLM.',
+	)
+	confidence_percent = serializers.FloatField(help_text='confidence × 100, rounded to 2 decimals.')
 	latency_ms = serializers.IntegerField()
 	warnings = serializers.ListField(child=serializers.CharField(), required=False, allow_empty=True)
 	query_log_id = serializers.IntegerField(required=False, allow_null=True)

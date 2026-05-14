@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import logging
 
+from django.conf import settings
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Count, Q
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from ai_engine.models import DocumentChunk
+
 from .models import Document
 from .models import DocumentIngestionJob
 from .serializers import AdminDocumentSerializer, DocumentIngestionJobSerializer, DocumentSerializer
+from .services import INGESTION_STATUS_PENDING, set_document_ingestion_status
 from .tasks import process_tax_document_ingestion_job
 
 logger = logging.getLogger(__name__)
@@ -33,14 +37,115 @@ class DocumentListCreateView(DocumentQuerysetMixin, generics.ListCreateAPIView):
             document.owner_id,
             document.title,
         )
+        set_document_ingestion_status(document, INGESTION_STATUS_PENDING)
         from ai_engine.tasks import embed_document_chunks
 
-        transaction.on_commit(lambda: embed_document_chunks.delay(document.pk))
+        logger.info(
+            '[INGESTION] DISPATCH_ON_COMMIT_REGISTER document_id=%s owner_id=%s DEBUG=%s',
+            document.pk,
+            document.owner_id,
+            settings.DEBUG,
+        )
+
+        def _queue_embed(doc_pk: int, owner_id: int) -> None:
+            logger.info(
+                '[INGESTION] ON_COMMIT_FIRE document_id=%s owner_id=%s DEBUG=%s',
+                doc_pk,
+                owner_id,
+                settings.DEBUG,
+            )
+            try:
+                if settings.DEBUG:
+                    logger.info(
+                        '[INGESTION] DISPATCH_SYNC_DEBUG apply() document_id=%s owner_id=%s',
+                        doc_pk,
+                        owner_id,
+                    )
+                    sync_result = embed_document_chunks.apply(args=[doc_pk])
+                    logger.info(
+                        '[INGESTION] DISPATCH_SYNC_AFTER task_id=%s document_id=%s owner_id=%s',
+                        sync_result.id,
+                        doc_pk,
+                        owner_id,
+                    )
+                    sync_result.get()
+                else:
+                    logger.info(
+                        '[INGESTION] DISPATCH_DELAY_BEFORE document_id=%s owner_id=%s',
+                        doc_pk,
+                        owner_id,
+                    )
+                    async_result = embed_document_chunks.delay(doc_pk)
+                    logger.info(
+                        '[INGESTION] DISPATCH_DELAY_AFTER task_id=%s document_id=%s owner_id=%s',
+                        async_result.id,
+                        doc_pk,
+                        owner_id,
+                    )
+            except Exception as exc:
+                logger.exception(
+                    '[INGESTION] DISPATCH_FAILED document_id=%s owner_id=%s DEBUG=%s — '
+                    'ingestion will not run until re-queued: %s',
+                    doc_pk,
+                    owner_id,
+                    settings.DEBUG,
+                    exc,
+                )
+
+        transaction.on_commit(
+            lambda: _queue_embed(document.pk, document.owner_id),
+        )
 
 
 class DocumentDetailView(DocumentQuerysetMixin, generics.RetrieveUpdateDestroyAPIView):
     serializer_class = DocumentSerializer
     permission_classes = [permissions.IsAuthenticated]
+
+
+class DocumentLibraryStatsView(APIView):
+    """
+    GET /api/v1/documents/library-stats/
+
+    Authenticated: returns chunk counts for the current user (ingestion health).
+    Use after upload to confirm ``embed_document_chunks`` populated ``DocumentChunk`` rows.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        user = request.user
+        chunk_total = DocumentChunk.objects.filter(document_owner=user).count()
+        docs = (
+            Document.objects.filter(owner=user)
+            .annotate(chunk_count=Count('chunks'))
+            .order_by('-updated_at')
+            .values('id', 'title', 'status', 'chunk_count', 'metadata', 'updated_at')[:200]
+        )
+        return Response(
+            {
+                'owner_id': user.pk,
+                'chunk_count_total': chunk_total,
+                'document_count': Document.objects.filter(owner=user).count(),
+                'documents': list(docs),
+            }
+        )
+
+
+class UserChunkDebugView(APIView):
+    """
+    GET /api/v1/debug/chunks/<user_id>/
+
+    Returns ``DocumentChunk`` count for that user (RAG ingestion verification).
+    Callers may only query their own ``user_id`` unless ``request.user.is_staff``.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, user_id: int, *args, **kwargs):
+        if request.user.pk != user_id and not request.user.is_staff:
+            return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
+        chunk_count = DocumentChunk.objects.filter(document_owner_id=user_id).count()
+        return Response({'user_id': user_id, 'chunk_count': chunk_count})
 
 
 class AdminDocumentReprocessView(APIView):
@@ -72,9 +177,19 @@ class AdminDocumentReprocessView(APIView):
 
         from ai_engine.tasks import embed_document_chunks
 
+        set_document_ingestion_status(document, INGESTION_STATUS_PENDING)
         try:
-            async_result = embed_document_chunks.delay(document.pk)
-            task_id = async_result.id
+            if settings.DEBUG:
+                logger.info(
+                    '[INGESTION] ADMIN_REPROCESS_SYNC_DEBUG document_id=%s',
+                    document.pk,
+                )
+                sync_result = embed_document_chunks.apply(args=[document.pk])
+                task_id = sync_result.id
+                sync_result.get()
+            else:
+                async_result = embed_document_chunks.delay(document.pk)
+                task_id = async_result.id
         except Exception as exc:
             logger.exception('Admin reprocess: failed to queue embed_document_chunks: %s', exc)
             return Response(

@@ -7,6 +7,7 @@ import time
 from typing import TYPE_CHECKING
 
 import numpy as np
+from django.conf import settings
 
 if TYPE_CHECKING:
 	from ai_engine.models import DocumentChunk
@@ -115,18 +116,53 @@ class EmbeddingService:
 
 	@classmethod
 	def generate_embeddings_batch(cls, texts: list[str]) -> np.ndarray:
-		"""Generate embeddings for multiple texts. Returns 2D numpy array (n_texts, dim)."""
+		"""Generate embeddings for multiple texts. Returns 2D numpy array (n_texts, dim).
+
+		Chunks long runs into sub-batches using ``settings.EMBEDDING_BATCH_SIZE`` to cap
+		peak RAM. ``SentenceTransformer`` remains a process singleton (see ``get_model``).
+		"""
 		model = cls.get_model()
 		n = len(texts)
 		char_total = sum(len(t or '') for t in texts)
+		batch_cap = int(getattr(settings, 'EMBEDDING_BATCH_SIZE', 8))
+		batch_cap = max(1, min(batch_cap, 128))
 		logger.info(
-			'EmbeddingService.generate_embeddings_batch: starting encode (chunks=%s, total_chars=%s)',
+			'EmbeddingService.generate_embeddings_batch: starting encode (chunks=%s, total_chars=%s, batch_cap=%s)',
 			n,
 			char_total,
+			batch_cap,
 		)
 		t0 = time.perf_counter()
 		try:
-			embeddings = model.encode(texts, convert_to_tensor=False)
+			if n == 0:
+				dim = int(model.get_sentence_embedding_dimension())
+				return np.zeros((0, dim), dtype=np.float32)
+			if n <= batch_cap:
+				embeddings = model.encode(
+					texts,
+					convert_to_tensor=False,
+					batch_size=min(batch_cap, n),
+					show_progress_bar=False,
+				)
+				out = np.asarray(embeddings, dtype=np.float32)
+			else:
+				parts: list[np.ndarray] = []
+				for start in range(0, n, batch_cap):
+					batch = texts[start : start + batch_cap]
+					logger.info(
+						'EmbeddingService.generate_embeddings_batch: sub-batch %s-%s of %s',
+						start,
+						start + len(batch),
+						n,
+					)
+					emb = model.encode(
+						batch,
+						convert_to_tensor=False,
+						batch_size=min(batch_cap, len(batch)),
+						show_progress_bar=False,
+					)
+					parts.append(np.asarray(emb, dtype=np.float32))
+				out = np.vstack(parts)
 		except Exception:
 			logger.exception(
 				'EmbeddingService.generate_embeddings_batch: encode failed after %.2fs (chunks=%s)',
@@ -139,9 +175,9 @@ class EmbeddingService:
 			'EmbeddingService.generate_embeddings_batch: encode finished in %.2fs (chunks=%s, shape=%s)',
 			elapsed,
 			n,
-			getattr(embeddings, 'shape', None),
+			out.shape,
 		)
-		return embeddings
+		return out
 
 	@classmethod
 	def embedding_to_bytes(cls, embedding: np.ndarray) -> bytes:

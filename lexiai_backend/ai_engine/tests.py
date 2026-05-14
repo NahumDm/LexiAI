@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 from django.contrib.auth import get_user_model
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from ai_engine.models import DocumentChunk, QueryLog
+from ai_engine.query_classification import (
+	ASK_GREETING_RESPONSE,
+	ASK_OUT_OF_SCOPE_RESPONSE,
+)
+from ai_engine.services.qa import generate_answer
 from ai_engine.services.chunking import ChunkingService
 from ai_engine.services.embedding import EmbeddingService
 from ai_engine.services.retrieval import RetrievalService
@@ -94,28 +101,85 @@ class RetrieverIntegrationTests(APITestCase):
 		self.assertEqual(len(chunks), 0)
 
 	def test_retrieve_with_chunks(self):
-		import numpy as np
+		from django.test import override_settings
 
-		chunk = DocumentChunk.objects.create(
-			document=self.document,
-			document_owner=self.user,
+		with override_settings(RAG_MIN_SIMILARITY=0.0):
+			# Align stored chunk vector with the query embedding so cosine ≥ floor
+			# (random vs query often scores < 0 and is filtered even when floor is 0).
+			query_text = 'test query'
+			query_emb = EmbeddingService.generate_embedding(query_text)
+			chunk = DocumentChunk.objects.create(
+				document=self.document,
+				document_owner=self.user,
+				sequence_index=0,
+				content='Test chunk content',
+				token_count=5,
+				embedding=EmbeddingService.embedding_to_bytes(query_emb),
+			)
+
+			chunks = RetrievalService.retrieve_relevant_chunks(
+				query_text=query_text,
+				document=self.document,
+				top_k=5,
+			)
+
+			self.assertGreater(len(chunks), 0)
+			retrieved = chunks[0]
+			self.assertEqual(retrieved.chunk.id, chunk.id)
+
+	def test_retrieve_includes_staff_global_kb_for_regular_user(self):
+		from django.test import override_settings
+
+		staff = User.objects.create_user(email='staff-kb@example.com', password='password123', is_staff=True)
+		admin_doc = Document.objects.create(
+			owner=staff,
+			title='Tax law KB',
+			extracted_text='VAT and corporate tax reference.',
+		)
+		query_text = 'vat retrieval probe unique phrase'
+		query_emb = EmbeddingService.generate_embedding(query_text)
+		DocumentChunk.objects.create(
+			document=admin_doc,
+			document_owner=staff,
 			sequence_index=0,
-			content='Test chunk content',
-			token_count=5,
-			embedding=EmbeddingService.embedding_to_bytes(
-				np.random.rand(384).astype(np.float32)
-			),
+			content='VAT registration and compliance rules for businesses.',
+			token_count=10,
+			embedding=EmbeddingService.embedding_to_bytes(query_emb),
 		)
+		with override_settings(RAG_MIN_SIMILARITY=0.0):
+			hits = RetrievalService.retrieve_relevant_chunks(
+				query_text=query_text,
+				document=None,
+				user=self.user,
+				top_k=5,
+			)
+		self.assertGreater(len(hits), 0)
+		self.assertEqual(hits[0].source, 'admin')
 
-		chunks = RetrievalService.retrieve_relevant_chunks(
-			query_text='test query',
-			document=self.document,
-			top_k=5,
+	def test_retrieve_document_denied_for_other_user_private_doc(self):
+		from django.test import override_settings
+
+		other = User.objects.create_user(email='other-private@example.com', password='password123')
+		other_doc = Document.objects.create(owner=other, title='Private', extracted_text='Secret clause.')
+		query_text = 'secret clause retrieval'
+		query_emb = EmbeddingService.generate_embedding(query_text)
+		DocumentChunk.objects.create(
+			document=other_doc,
+			document_owner=other,
+			sequence_index=0,
+			content='Secret clause alpha bravo charlie.',
+			token_count=6,
+			embedding=EmbeddingService.embedding_to_bytes(query_emb),
 		)
-
-		self.assertGreater(len(chunks), 0)
-		retrieved = chunks[0]
-		self.assertEqual(retrieved.chunk.id, chunk.id)
+		with override_settings(RAG_MIN_SIMILARITY=0.0):
+			hits = RetrievalService.retrieve_relevant_chunks(
+				query_text=query_text,
+				document=other_doc,
+				user=None,
+				top_k=5,
+				accessing_user=self.user,
+			)
+		self.assertEqual(len(hits), 0)
 
 
 class ChatAPIIntegrationTests(APITestCase):
@@ -147,6 +211,7 @@ class ChatAPIIntegrationTests(APITestCase):
 		)
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
 		self.assertIn('answer', response.data)
+		self.assertEqual(response.data['answer'], ASK_GREETING_RESPONSE)
 
 	def test_chat_missing_query(self):
 		response = self.client.post(
@@ -211,3 +276,91 @@ class QueryLogTests(APITestCase):
 		self.assertEqual(log.user, self.user)
 		self.assertEqual(log.conversation, self.conversation)
 		self.assertEqual(log.latency_ms, 250)
+
+
+class AskGenerateAnswerRoutingTests(APITestCase):
+	"""Deterministic /ask routing when retrieval is empty or strict RAG when chunks exist."""
+
+	def setUp(self):
+		self.user = User.objects.create_user(email='askroute@example.com', password='password123')
+
+	@patch('ai_engine.services.qa.semantic_search')
+	def test_greeting_no_retrieval(self, mock_search):
+		out = generate_answer('hi', user=self.user, save_log=False)
+		self.assertEqual(out['answer'], ASK_GREETING_RESPONSE)
+		self.assertEqual(out['confidence'], 1.0)
+		self.assertEqual(out['confidence_percent'], 100.0)
+		self.assertEqual(out['sources'], [])
+		mock_search.assert_not_called()
+
+	@patch('ai_engine.services.qa.semantic_search')
+	def test_out_of_scope_no_retrieval(self, mock_search):
+		out = generate_answer('Who won the football world cup?', user=self.user, save_log=False)
+		self.assertEqual(out['answer'], ASK_OUT_OF_SCOPE_RESPONSE)
+		self.assertEqual(out['confidence'], 1.0)
+		self.assertEqual(out['sources'], [])
+		mock_search.assert_not_called()
+
+	@patch('ai_engine.services.qa.generate_completion', return_value='General knowledge fallback answer.')
+	@patch('ai_engine.services.qa.semantic_search')
+	def test_legal_no_chunks_uses_llm_fallback(self, mock_search, _mock_llm):
+		mock_search.return_value = ([], 0.0)
+		out = generate_answer('What are the penalties for tax evasion?', user=self.user, save_log=False)
+		self.assertEqual(out['answer'], 'General knowledge fallback answer.')
+		self.assertEqual(out['confidence'], 0.0)
+		self.assertEqual(out['sources'], [])
+		mock_search.assert_called_once()
+
+	@patch('ai_engine.services.qa.generate_completion', return_value='General knowledge fallback answer.')
+	@patch('ai_engine.services.qa.semantic_search')
+	def test_unknown_no_chunks_uses_llm_fallback(self, mock_search, _mock_llm):
+		mock_search.return_value = ([], 0.0)
+		out = generate_answer('Who won the world cup?', user=self.user, save_log=False)
+		self.assertEqual(out['answer'], 'General knowledge fallback answer.')
+		self.assertEqual(out['confidence'], 0.0)
+		mock_search.assert_called_once()
+
+	@patch('ai_engine.services.qa.generate_completion', return_value='Combined [Source 1] and [Source 2].')
+	@patch('ai_engine.services.qa.semantic_search')
+	def test_strict_rag_confidence_is_max_over_used_chunks(self, mock_search, _mock_llm):
+		c1 = MagicMock()
+		c1.id = 1
+		c1.document_id = 1
+		c1.document = MagicMock()
+		c1.document.title = 'A'
+		c1.content = 'First passage.'
+		c1.relevance_score = 0.5
+		c2 = MagicMock()
+		c2.id = 2
+		c2.document_id = 1
+		c2.document = MagicMock()
+		c2.document.title = 'A'
+		c2.content = 'Second passage.'
+		c2.relevance_score = 0.9
+		mock_search.return_value = ([c1, c2], 0.9)
+		out = generate_answer('What does the tax law say?', user=self.user, save_log=False)
+		self.assertEqual(out['confidence'], 0.9)
+		self.assertEqual(out['confidence_percent'], 90.0)
+		self.assertAlmostEqual(out['retrieval_confidence'], 0.7, places=5)
+
+	@patch('ai_engine.services.qa.generate_completion', return_value='Under [Source 1], the rule applies.')
+	@patch('ai_engine.services.qa.semantic_search')
+	def test_strict_rag_uses_chunk_similarity_confidence(self, mock_search, _mock_llm):
+		ch = MagicMock()
+		ch.id = 42
+		ch.document_id = 7
+		ch.document = MagicMock()
+		ch.document.title = 'Federal Income Tax Proclamation'
+		ch.content = 'A taxpayer who conceals income shall be subject to penalties as described herein.'
+		ch.relevance_score = 0.78
+		mock_search.return_value = ([ch], 0.78)
+		out = generate_answer(
+			'What penalties apply for tax evasion under the proclamation?',
+			user=self.user,
+			save_log=False,
+		)
+		self.assertIn('[Source 1]', out['answer'])
+		self.assertEqual(out['confidence'], 0.78)
+		self.assertEqual(out['confidence_percent'], 78.0)
+		self.assertEqual(len(out['sources']), 1)
+		self.assertEqual(out['sources'][0]['relevance'], 0.78)

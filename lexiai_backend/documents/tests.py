@@ -281,3 +281,75 @@ class AdminDocumentReprocessApiTests(APITestCase):
 			self.assertEqual(response.data['job_id'], 'test-celery-task-id')
 			self.assertEqual(response.data['status'], 'queued')
 			mock_delay.assert_called_once_with(self.doc.pk)
+
+
+@override_settings(CELERY_TASK_ALWAYS_EAGER=True, CELERY_TASK_EAGER_PROPAGATES=True)
+class DocumentUploadIngestionIntegrationTests(TransactionTestCase):
+	"""Upload via API runs ``transaction.on_commit`` → ``embed_document_chunks`` (eager)."""
+
+	def setUp(self):
+		self.client = APIClient()
+		self.user = User.objects.create_user(email='upload-ingest@example.com', password='password123')
+		self.client.force_authenticate(user=self.user)
+
+	@patch('ai_engine.tasks.EmbeddingService.generate_embeddings_batch')
+	def test_multipart_upload_creates_chunks(self, mock_batch):
+		mock_batch.side_effect = lambda texts: np.zeros((len(texts), 384), dtype=np.float32)
+		with tempfile.TemporaryDirectory() as media:
+			with override_settings(MEDIA_ROOT=media):
+				uploaded = SimpleUploadedFile(
+					'statute.txt',
+					b'VAT registration. Income tax obligations. Penalties apply under the law. ' * 4,
+					content_type='text/plain',
+				)
+				response = self.client.post(
+					'/api/v1/documents/',
+					{'title': 'Tax statute', 'source_file': uploaded},
+					format='multipart',
+				)
+		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+		doc = Document.objects.get(pk=response.data['id'])
+		self.assertEqual(doc.status, Document.Status.READY)
+		self.assertGreater(DocumentChunk.objects.filter(document=doc, document_owner=self.user).count(), 0)
+		self.assertEqual((doc.metadata or {}).get('ingestion_status'), 'completed')
+		mock_batch.assert_called_once()
+
+	def test_debug_chunks_endpoint_self_only(self):
+		other = User.objects.create_user(email='other-chunks@example.com', password='password123')
+		self.client.force_authenticate(user=other)
+		r = self.client.get(f'/api/v1/debug/chunks/{self.user.pk}/')
+		self.assertEqual(r.status_code, status.HTTP_403_FORBIDDEN)
+
+	@patch('ai_engine.tasks.EmbeddingService.generate_embeddings_batch')
+	def test_debug_chunks_endpoint_returns_count(self, mock_batch):
+		mock_batch.side_effect = lambda texts: np.zeros((len(texts), 384), dtype=np.float32)
+		with tempfile.TemporaryDirectory() as media:
+			with override_settings(MEDIA_ROOT=media):
+				uploaded = SimpleUploadedFile(
+					'x.txt',
+					b'Corporate tax filing deadlines and compliance rules. ' * 4,
+					content_type='text/plain',
+				)
+				self.client.post(
+					'/api/v1/documents/',
+					{'title': 'T', 'source_file': uploaded},
+					format='multipart',
+				)
+		r = self.client.get(f'/api/v1/debug/chunks/{self.user.pk}/')
+		self.assertEqual(r.status_code, status.HTTP_200_OK)
+		self.assertEqual(r.data['user_id'], self.user.pk)
+		self.assertGreater(r.data['chunk_count'], 0)
+
+	def test_library_stats_endpoint(self):
+		Document.objects.create(
+			owner=self.user,
+			title='No file',
+			extracted_text='',
+			status=Document.Status.UPLOADED,
+		)
+		r = self.client.get('/api/v1/documents/library-stats/')
+		self.assertEqual(r.status_code, status.HTTP_200_OK)
+		self.assertEqual(r.data['owner_id'], self.user.pk)
+		self.assertIn('chunk_count_total', r.data)
+		self.assertIn('documents', r.data)
+		self.assertEqual(r.data['chunk_count_total'], 0)

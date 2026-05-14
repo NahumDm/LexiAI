@@ -7,11 +7,13 @@ from .views import (
     AdminDocumentListView,
     AdminDocumentReprocessView,
     DocumentDetailView,
+    DocumentLibraryStatsView,
     DocumentListCreateView,
 )
 
 urlpatterns = [
     path('', DocumentListCreateView.as_view(), name='document-list'),
+    path('library-stats/', DocumentLibraryStatsView.as_view(), name='document-library-stats'),
     path('<int:pk>/ingest/', AdminDocumentReprocessView.as_view(), name='document-reprocess'),
     path('<int:pk>/', DocumentDetailView.as_view(), name='document-detail'),
     # Admin-only GLOBAL listing. Registered BEFORE `admin/ingestions/` so the

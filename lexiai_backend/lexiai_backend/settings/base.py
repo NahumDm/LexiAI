@@ -290,6 +290,14 @@ MISTRAL_TIMEOUT_SECONDS = env_int('MISTRAL_TIMEOUT_SECONDS', 60)
 # in a daemon thread. Keep off for management commands; on for server processes.
 AI_WARMUP_ON_STARTUP = env_bool('AI_WARMUP_ON_STARTUP', False)
 
+# RAG: cosine similarity floor (0–1). Chunks below this are never shown to the LLM.
+# Default 0.2 for demo/MVP; raise (e.g. 0.45–0.65) in production via RAG_MIN_SIMILARITY.
+RAG_MIN_SIMILARITY = float(env('RAG_MIN_SIMILARITY', '0.2'))
+# Default number of chunks to send to the LLM after threshold filtering (cap cost / noise).
+RAG_DEFAULT_TOP_K = env_int('RAG_DEFAULT_TOP_K', 3)
+# SentenceTransformer.encode batch size inside Celery (lower = less RAM per document).
+EMBEDDING_BATCH_SIZE = env_int('EMBEDDING_BATCH_SIZE', 8)
+
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,

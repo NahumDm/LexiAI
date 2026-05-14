@@ -9,6 +9,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
 	from ai_engine.services.retrieval import RetrievedChunk
 
+from ai_engine.strict_grounding import (
+	GENERAL_KNOWLEDGE_FALLBACK_SYSTEM_PROMPT,
+	STRICT_LEGAL_SYSTEM_PROMPT,
+)
+
 logger = logging.getLogger(__name__)
 
 CONFIDENCE_THRESHOLD = 0.35
@@ -47,12 +52,18 @@ def _is_real_secret(value: str | None) -> bool:
 
 @dataclass
 class ChatResponse:
-	"""Response from LLM with answer and source metadata."""
+	"""Response from LLM with answer and source metadata.
+
+	``retrieval_confidence`` is the mean cosine across retrieved chunks (logging).
+	``confidence`` is the max cosine among those chunks (UX; matches ``/ask/``).
+	"""
+
 	answer: str
 	sources: list[dict[str, str | int | float]]
 	model_used: str
 	tokens_used: dict[str, int]
 	retrieval_confidence: float = 0.0
+	confidence: float = 0.0
 	warnings: list[str] = None
 	# Set by RAGPipeline after QueryLog.objects.create
 	query_log_id: int | None = None
@@ -94,32 +105,25 @@ class StubLLMClient(LLMClient):
 		warnings = []
 	
 		if not context_chunks:
-			warnings.append('General chat: no indexed document passages matched this query.')
-			q = query.strip()
-			ql = q.lower()
-			if ql in {'hi', 'hello', 'hey', 'hi there'} or ql.startswith(('hello', 'hey ')):
-				answer = (
-					"Hello! I'm LexiAI. Ask me anything here in general chat, or upload documents "
-					'for answers grounded in your files with citations.'
-				)
-			elif 'thank' in ql:
-				answer = "You're welcome — happy to help anytime."
-			else:
-				answer = (
-					"I don't have indexed document excerpts that match this question yet. "
-					"I'm still happy to chat generally — try rephrasing, or upload relevant documents "
-					'for citation-backed legal/tax answers.'
-				)
+			warnings.append(
+				'No document passages met the similarity threshold; answering from general knowledge (stub).',
+			)
 			return ChatResponse(
-				answer=answer,
+				answer=(
+					'(General knowledge — no indexed passages above threshold.) '
+					f'Question summary: {query.strip()[:280]!r}\n'
+					'Configure MISTRAL_API_KEY / MISTRAL_BASE_URL for full LLM answers.'
+				),
 				sources=[],
 				model_used='stub-v1',
 				tokens_used={'prompt': 0, 'completion': 0, 'total': 0},
 				retrieval_confidence=0.0,
+				confidence=0.0,
 				warnings=warnings,
 			)
 
 		avg_confidence = sum(c.relevance_score for c in context_chunks) / len(context_chunks)
+		max_confidence = max(c.relevance_score for c in context_chunks)
 		if avg_confidence < CONFIDENCE_THRESHOLD:
 			warnings.append(f'Low confidence retrieval (avg: {avg_confidence:.2f}). Please verify sources carefully.')
 
@@ -131,6 +135,7 @@ class StubLLMClient(LLMClient):
 				'document_title': document_title,
 				'relevance': round(retrieved.relevance_score, 3),
 				'excerpt': chunk.content[:200],
+				'source': retrieved.source,
 			})
 
 		excerpt_preview = '\n\n'.join(
@@ -150,6 +155,7 @@ class StubLLMClient(LLMClient):
 			model_used='stub-v1',
 			tokens_used={'prompt': 0, 'completion': 0, 'total': 0},
 			retrieval_confidence=avg_confidence,
+			confidence=max_confidence,
 			warnings=warnings,
 		)
 
@@ -251,27 +257,6 @@ class MistralLLMClient(LLMClient):
 		text = (response.choices[0].message.content or '').strip()
 		return text, self._usage_tokens(response)
 
-	def _answer_without_documents(self, query: str, warnings: list[str]) -> ChatResponse:
-		warnings.append(
-			'No document passages retrieved — general conversational reply (not RAG-grounded).'
-		)
-		system_prompt = (
-			'You are a helpful AI assistant named LexiAI. '
-			'No relevant document excerpts were available for this message. '
-			'Reply naturally to greetings and general conversation. '
-			'If the user asks for legal or tax analysis that would require specific documents, '
-			'briefly explain that uploading and indexing documents enables citation-backed answers.'
-		)
-		answer, tokens_used = self._chat(system_prompt, query.strip())
-		return ChatResponse(
-			answer=answer,
-			sources=[],
-			model_used=self.model,
-			tokens_used=tokens_used,
-			retrieval_confidence=0.0,
-			warnings=warnings,
-		)
-
 	def generate_response(
 		self,
 		query: str,
@@ -281,12 +266,35 @@ class MistralLLMClient(LLMClient):
 		sources: list[dict[str, str | int | float]] = []
 
 		if not context_chunks:
-			return self._answer_without_documents(query, warnings)
+			warnings.append(
+				'No document passages met the similarity threshold; answering from general knowledge.',
+			)
+			system_prompt = GENERAL_KNOWLEDGE_FALLBACK_SYSTEM_PROMPT
+			user_prompt = (
+				'The indexed document library returned no passages above the relevance threshold '
+				'for this question.\n\n'
+				f'User question:\n{query.strip()}'
+			)
+			try:
+				answer, tokens_used = self._chat(system_prompt, user_prompt)
+			except Exception as exc:
+				logger.exception('LLM general-knowledge fallback failed: %s', exc)
+				raise
+			return ChatResponse(
+				answer=answer,
+				sources=[],
+				model_used=self.model,
+				tokens_used=tokens_used,
+				retrieval_confidence=0.0,
+				confidence=0.0,
+				warnings=warnings,
+			)
 
 		avg_confidence = sum(c.relevance_score for c in context_chunks) / len(context_chunks)
+		max_confidence = max(c.relevance_score for c in context_chunks)
 		if avg_confidence < CONFIDENCE_THRESHOLD:
 			warnings.append(
-				f'Low confidence retrieval ({avg_confidence:.1%}). Verify citations against source documents.'
+				f'Low average retrieval score ({avg_confidence:.1%}); verify citations against source documents.'
 			)
 
 		context_parts: list[str] = []
@@ -301,19 +309,17 @@ class MistralLLMClient(LLMClient):
 				'document_title': document_title,
 				'relevance': round(retrieved.relevance_score, 3),
 				'excerpt': chunk.content[:200],
+				'source': retrieved.source,
 			})
 
 		context_text = '\n\n'.join(context_parts)
 
-		system_prompt = (
-			'You are a legal/tax research assistant. Answer using ONLY the passages in "Document excerpts". '
-			'If the excerpts do not contain the answer, say so and avoid inventing facts. '
-			'Cite each claim with [Source N] matching the excerpt labels. Be concise.'
-		)
+		system_prompt = STRICT_LEGAL_SYSTEM_PROMPT
 		user_prompt = (
-			f'User question:\n{query}\n\n'
+			f'User question:\n{query.strip()}\n\n'
 			f'Document excerpts:\n{context_text}\n\n'
-			f'Answer the question with [Source N] citations.'
+			'Answer using ONLY the excerpts above. If you cannot, respond EXACTLY with: I don\'t know.\n'
+			'Otherwise cite every factual claim with [Source N] matching the excerpt labels.'
 		)
 
 		try:
@@ -327,6 +333,7 @@ class MistralLLMClient(LLMClient):
 				model_used=self.model,
 				tokens_used=tokens_used,
 				retrieval_confidence=avg_confidence,
+				confidence=max_confidence,
 				warnings=warnings,
 			)
 		except Exception as exc:

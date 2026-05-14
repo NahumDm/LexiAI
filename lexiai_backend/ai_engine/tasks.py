@@ -41,83 +41,175 @@ def embed_document_chunks(self, document_id: int) -> dict[str, int]:
 	Returns: {created: int, updated: int}
 	"""
 	from documents.models import Document
-	from documents.services import merge_document_metadata, populate_extracted_text_from_source_file
+	from documents.services import (
+		INGESTION_STATUS_COMPLETED,
+		INGESTION_STATUS_FAILED,
+		INGESTION_STATUS_PROCESSING,
+		merge_document_metadata,
+		populate_extracted_text_from_source_file,
+		set_document_ingestion_status,
+	)
 
+	task_id = getattr(getattr(self, 'request', None), 'id', None)
 	result: dict[str, int] = {'created': 0, 'updated': 0}
 	document: Document | None = None
 
+	logger.info(
+		'[INGESTION] TASK_STARTED task=embed_document_chunks document_id=%s celery_task_id=%s',
+		document_id,
+		task_id,
+	)
+
 	try:
-		document = Document.objects.get(pk=document_id)
+		document = Document.objects.select_related('owner').get(pk=document_id)
 	except Document.DoesNotExist:
-		logger.error('Document embedding pipeline: document id=%s not found', document_id)
+		logger.error(
+			'[INGESTION] DOCUMENT_NOT_FOUND document_id=%s celery_task_id=%s',
+			document_id,
+			task_id,
+		)
 		raise
 
-	try:
-		logger.info('Starting ingestion for document %s', document_id)
+	logger.info(
+		'[INGESTION] DOCUMENT_FETCHED document_id=%s owner_id=%s title=%r status=%s '
+		'celery_task_id=%s',
+		document.pk,
+		document.owner_id,
+		document.title,
+		document.status,
+		task_id,
+	)
 
+	has_file = bool(document.source_file and document.source_file.name)
+	logger.info(
+		'[INGESTION] DOCUMENT_SNAPSHOT document_id=%s owner_id=%s has_source_file=%s '
+		'extracted_text_len=%s metadata_ingestion_status=%s celery_task_id=%s',
+		document_id,
+		document.owner_id,
+		has_file,
+		len((document.extracted_text or '').strip()),
+		(document.metadata or {}).get('ingestion_status'),
+		task_id,
+	)
+
+	try:
 		if not populate_extracted_text_from_source_file(document):
 			logger.warning(
-				'Ingestion aborted for document %s: no extractable text (see metadata.ingestion_failed)',
+				'[INGESTION] TEXT_EXTRACT_FAILED document_id=%s owner_id=%s — no extractable text '
+				'(see metadata) celery_task_id=%s',
 				document_id,
+				document.owner_id,
+				task_id,
 			)
-			# Explicit so ``finally`` persists a known state (populate may only touch metadata).
+			set_document_ingestion_status(
+				document,
+				INGESTION_STATUS_FAILED,
+				ingestion_failure_stage='populate_extracted_text',
+			)
 			document.status = Document.Status.UPLOADED
 			return result
 
 		document.refresh_from_db()
+		text_len = len((document.extracted_text or '').strip())
 		logger.info(
-			'Extracted text length: %s (document %s)',
-			len((document.extracted_text or '').strip()),
+			'[INGESTION] TEXT_EXTRACTED document_id=%s owner_id=%s length=%s celery_task_id=%s',
 			document_id,
+			document.owner_id,
+			text_len,
+			task_id,
 		)
 
+		set_document_ingestion_status(document, INGESTION_STATUS_PROCESSING, ingestion_started_task_id=str(task_id))
 		document.status = Document.Status.PROCESSING
+		document.save(update_fields=['status', 'metadata', 'updated_at'])
 
 		try:
 			chunks_data = ChunkingService.chunk_document(document.extracted_text)
 		except Exception as exc:
-			logger.error('Chunking failed for document %s: %s', document_id, exc)
+			logger.exception(
+				'[INGESTION] CHUNKING_EXCEPTION document_id=%s owner_id=%s celery_task_id=%s',
+				document_id,
+				document.owner_id,
+				task_id,
+			)
 			raise self.retry(exc=exc, countdown=60) from exc
 
-		logger.info('Chunks created: %s (document %s)', len(chunks_data), document_id)
+		n_chunks = len(chunks_data)
+		logger.info(
+			'[INGESTION] CHUNKS_CREATED document_id=%s owner_id=%s count=%s celery_task_id=%s',
+			document_id,
+			document.owner_id,
+			n_chunks,
+			task_id,
+		)
 
 		if not chunks_data:
 			logger.warning(
-				'Document id=%s: chunking produced zero chunks — removing old chunks if any',
+				'[INGESTION] CHUNKS_ZERO document_id=%s owner_id=%s celery_task_id=%s',
 				document_id,
+				document.owner_id,
+				task_id,
 			)
 			DocumentChunk.objects.filter(document=document).delete()
 			merge_document_metadata(
 				document,
-				{'ingestion_failed': True, 'ingestion_error': 'no_chunkable_content'},
+				{
+					'ingestion_failed': True,
+					'ingestion_error': 'no_chunkable_content',
+					'ingestion_status': INGESTION_STATUS_FAILED,
+					'ingestion_failure_stage': 'chunking_empty',
+				},
 			)
 			document.status = Document.Status.UPLOADED
+			document.save(update_fields=['status', 'metadata', 'updated_at'])
 			return result
 
+		logger.info(
+			'[INGESTION] EMBEDDING_START document_id=%s owner_id=%s texts=%s celery_task_id=%s',
+			document_id,
+			document.owner_id,
+			n_chunks,
+			task_id,
+		)
 		try:
 			texts = [chunk['content'] for chunk in chunks_data]
-			logger.info(
-				'Calling EmbeddingService.generate_embeddings_batch (document=%s, chunks=%s)',
-				document_id,
-				len(texts),
-			)
 			embeddings = EmbeddingService.generate_embeddings_batch(texts)
 			emb_count = len(embeddings)
 		except Exception as exc:
-			logger.error('Embedding failed for document %s: %s', document_id, exc)
+			logger.exception(
+				'[INGESTION] EMBEDDING_EXCEPTION document_id=%s owner_id=%s celery_task_id=%s',
+				document_id,
+				document.owner_id,
+				task_id,
+			)
 			raise self.retry(exc=exc, countdown=60) from exc
 
-		logger.info('Embeddings generated: %s (document %s)', emb_count, document_id)
+		logger.info(
+			'[INGESTION] EMBEDDING_END document_id=%s owner_id=%s embeddings=%s shape=%s celery_task_id=%s',
+			document_id,
+			document.owner_id,
+			emb_count,
+			getattr(embeddings, 'shape', None),
+			task_id,
+		)
 
 		if emb_count != len(chunks_data):
 			logger.error(
-				'Embedding count mismatch for document %s: chunks=%s embeddings=%s',
+				'[INGESTION] EMBEDDING_COUNT_MISMATCH document_id=%s chunks=%s embeddings=%s celery_task_id=%s',
 				document_id,
 				len(chunks_data),
 				emb_count,
+				task_id,
 			)
 			raise RuntimeError('EmbeddingService returned mismatched result count')
 
+		logger.info(
+			'[INGESTION] DB_SAVE_START document_id=%s owner_id=%s rows=%s celery_task_id=%s',
+			document_id,
+			document.owner_id,
+			len(chunks_data),
+			task_id,
+		)
 		created_count = 0
 		updated_count = 0
 		processed_indices: list[int] = []
@@ -144,42 +236,102 @@ def embed_document_chunks(self, document_id: int) -> dict[str, int]:
 			processed_indices.append(chunk_data['sequence_index'])
 
 		logger.info(
-			'Document id=%s: chunk rows upserted created=%s updated=%s',
+			'[INGESTION] DB_SAVE_END document_id=%s owner_id=%s created=%s updated=%s '
+			'total_written=%s celery_task_id=%s',
 			document_id,
+			document.owner_id,
 			created_count,
 			updated_count,
+			len(processed_indices),
+			task_id,
 		)
 
 		try:
-			DocumentChunk.objects.filter(document=document).exclude(sequence_index__in=processed_indices).delete()
-			logger.info('Removed stale chunks for document %s', document_id)
+			deleted, _ = DocumentChunk.objects.filter(document=document).exclude(
+				sequence_index__in=processed_indices
+			).delete()
+			if deleted:
+				logger.info(
+					'[INGESTION] DB_STALE_CHUNKS_DELETED document_id=%s deleted=%s celery_task_id=%s',
+					document_id,
+					deleted,
+					task_id,
+				)
 		except Exception as exc:
-			logger.warning('Failed to remove stale chunks for document %s: %s', document_id, exc)
+			logger.warning(
+				'[INGESTION] DB_STALE_DELETE_WARN document_id=%s: %s celery_task_id=%s',
+				document_id,
+				exc,
+				task_id,
+			)
 
 		_clear_transient_failure_metadata(document)
-		document.save(update_fields=['metadata', 'updated_at'])
+		set_document_ingestion_status(
+			document,
+			INGESTION_STATUS_COMPLETED,
+			ingestion_chunk_count=len(processed_indices),
+			ingestion_completed_task_id=str(task_id),
+		)
 
 		document.status = Document.Status.READY
-		document.save(update_fields=['status'])
-		print(f'Document ready: {document.pk}')
+		document.save(update_fields=['status', 'metadata', 'updated_at'])
+
 		logger.info(
-			'Document ready: %s (chunks=%s, created=%s, updated=%s)',
+			'[INGESTION] TASK_COMPLETED document_id=%s owner_id=%s chunks=%s created=%s updated=%s celery_task_id=%s',
 			document_id,
+			document.owner_id,
 			len(processed_indices),
 			created_count,
 			updated_count,
+			task_id,
 		)
 		result = {'created': created_count, 'updated': updated_count}
 
 	except Retry:
+		logger.info(
+			'[INGESTION] TASK_RETRY document_id=%s owner_id=%s celery_task_id=%s',
+			document_id,
+			getattr(document, 'owner_id', None),
+			task_id,
+		)
 		raise
-	except Exception as e:
+	except Exception as exc:
+		logger.exception(
+			'[INGESTION] TASK_FAILED document_id=%s owner_id=%s celery_task_id=%s',
+			document_id,
+			getattr(document, 'owner_id', None),
+			task_id,
+		)
 		if document is not None:
-			document.status = Document.Status.UPLOADED
-			print(f'FAILED: {e}')
+			try:
+				merge_document_metadata(
+					document,
+					{
+						'embedding_failed': True,
+						'embedding_error': type(exc).__name__,
+						'embedding_detail': str(exc)[:500],
+						'ingestion_status': INGESTION_STATUS_FAILED,
+						'ingestion_failure_stage': 'task_exception',
+					},
+				)
+				document.status = Document.Status.UPLOADED
+				document.save(update_fields=['status', 'metadata', 'updated_at'])
+			except Exception as save_exc:
+				logger.exception(
+					'[INGESTION] FAILURE_METADATA_SAVE_ERROR document_id=%s: %s',
+					document_id,
+					save_exc,
+				)
 		raise
 	finally:
 		if document is not None:
-			document.save(update_fields=['status'])
+			try:
+				document.save(update_fields=['status', 'updated_at'])
+			except Exception as fin_exc:
+				logger.error(
+					'[INGESTION] FINALLY_STATUS_SAVE_ERROR document_id=%s: %s',
+					document_id,
+					fin_exc,
+				)
 
 	return result

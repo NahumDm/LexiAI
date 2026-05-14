@@ -338,6 +338,20 @@ def merge_document_metadata(document: Document, patch: dict) -> None:
     document.save(update_fields=['metadata', 'updated_at'])
 
 
+# --- Ingestion observability (stored on ``Document.metadata``) ----------------
+INGESTION_STATUS_PENDING = 'pending'
+INGESTION_STATUS_PROCESSING = 'processing'
+INGESTION_STATUS_FAILED = 'failed'
+INGESTION_STATUS_COMPLETED = 'completed'
+
+
+def set_document_ingestion_status(document: Document, status: str, **extras: object) -> None:
+    """Persist pipeline phase for admin UI / debugging (``metadata['ingestion_status']``)."""
+    patch: dict[str, object] = {'ingestion_status': status}
+    patch.update(extras)
+    merge_document_metadata(document, patch)
+
+
 def populate_extracted_text_from_source_file(document: Document) -> bool:
     """
     Ensure ``document.extracted_text`` is populated when the client uploaded
@@ -350,13 +364,20 @@ def populate_extracted_text_from_source_file(document: Document) -> bool:
     """
     if (document.extracted_text or '').strip():
         logger.info(
-            'Document id=%s: extracted_text already present (length=%s)',
+            'Document id=%s owner_id=%s: extracted_text already present (length=%s)',
             document.pk,
+            document.owner_id,
             len(document.extracted_text),
         )
         return True
 
     field = document.source_file
+    logger.info(
+        'populate_extracted_text: document_id=%s owner_id=%s has_source_file=%s',
+        document.pk,
+        document.owner_id,
+        bool(field and field.name),
+    )
     if not field or not field.name:
         logger.warning('Document id=%s: cannot extract — no source_file', document.pk)
         merge_document_metadata(

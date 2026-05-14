@@ -4,11 +4,14 @@ from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, Spec
 
 from accounts.views import AdminUserDetailView, AdminUserListView
 
+from documents.views import UserChunkDebugView
+
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/schema/', SpectacularAPIView.as_view(), name='api-schema'),
     path('api/docs/', SpectacularSwaggerView.as_view(url_name='api-schema'), name='api-docs'),
     path('api/redoc/', SpectacularRedocView.as_view(url_name='api-schema'), name='api-redoc'),
+    path('api/v1/debug/chunks/<int:user_id>/', UserChunkDebugView.as_view(), name='debug-user-chunks'),
     path('api/v1/', include('core.urls')),
     path('api/v1/auth/', include('accounts.urls')),
     # Admin-only account listing. Lives at /accounts/ (not /auth/) per the

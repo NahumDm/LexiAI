@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import numbers
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db.models import Avg, Count, Q
 from django.utils import timezone
@@ -28,6 +29,10 @@ from documents.models import Document
 User = get_user_model()
 
 logger = logging.getLogger(__name__)
+
+
+def _default_min_similarity() -> float:
+	return float(getattr(settings, 'RAG_MIN_SIMILARITY', 0.2))
 
 
 
@@ -56,6 +61,7 @@ def _json_native(value):
 def _chat_response_to_response_body(chat_response) -> dict:
 	"""Build API JSON dict without failing DRF validation on numpy / edge types."""
 	tu = chat_response.tokens_used or {}
+	conf = float(_json_native(getattr(chat_response, 'confidence', chat_response.retrieval_confidence)))
 	return {
 		'answer': '' if chat_response.answer is None else str(chat_response.answer),
 		'sources': _json_native(chat_response.sources or []),
@@ -66,6 +72,8 @@ def _chat_response_to_response_body(chat_response) -> dict:
 			'total': int(_json_native(tu.get('total', 0))),
 		},
 		'retrieval_confidence': float(_json_native(chat_response.retrieval_confidence)),
+		'confidence': conf,
+		'confidence_percent': round(conf * 100.0, 2),
 		'warnings': [str(w) for w in (chat_response.warnings or [])],
 		'query_id': int(chat_response.query_log_id) if chat_response.query_log_id is not None else None,
 	}
@@ -73,16 +81,18 @@ def _chat_response_to_response_body(chat_response) -> dict:
 
 class ChatAskView(generics.CreateAPIView):
 	"""
-	Chat endpoint: grounded RAG when document passages exist, otherwise general chat.
+	Chat endpoint: strict document-grounded RAG only.
 
 	POST /api/v1/chat/{conversation_id}/ask/
 	{
 		"query": "What are the key clauses?",
-		"top_k": 5
+		"top_k": 3,
+		"min_similarity": 0.2
 	}
 
 	Does not require conversation.document; retrieval prefers attached document, else the owner's library.
-	If no chunks match, the LLM answers conversationally (no 400).
+	If no passages meet the similarity threshold, returns a professional
+	no-context or redirect message — no general-knowledge LLM fallback.
 	"""
 	serializer_class = ChatQuerySerializer
 	permission_classes = [permissions.IsAuthenticated, IsConversationOwner]
@@ -101,7 +111,8 @@ class ChatAskView(generics.CreateAPIView):
 		serializer.is_valid(raise_exception=True)
 
 		query = serializer.validated_data['query']
-		top_k = serializer.validated_data.get('top_k', 5)
+		top_k = serializer.validated_data.get('top_k', 3)
+		min_similarity = serializer.validated_data.get('min_similarity', _default_min_similarity())
 
 		try:
 			conversation = self.get_conversation()
@@ -115,13 +126,28 @@ class ChatAskView(generics.CreateAPIView):
 		# otherwise RetrievalService falls back to all chunks owned by conversation.owner.
 		doc_pk = getattr(conversation.document, 'pk', None)
 		logger.info(
+			'[DEBUG_RAG] chat_ask request.user_id=%s is_authenticated=%s conversation_owner_id=%s '
+			'conversation_id=%s document_id=%s',
+			getattr(request.user, 'pk', None),
+			getattr(request.user, 'is_authenticated', False),
+			conversation.owner_id,
+			conversation.id,
+			doc_pk,
+		)
+		if conversation.owner_id != getattr(request.user, 'pk', None):
+			logger.warning(
+				'[DEBUG_RAG] owner mismatch request.user_id=%s conversation.owner_id=%s',
+				getattr(request.user, 'pk', None),
+				conversation.owner_id,
+			)
+		logger.info(
 			'chat_ask start conversation_id=%s owner_id=%s document_id=%s (optional)',
 			conversation.id,
 			conversation.owner_id,
 			doc_pk,
 		)
 
-		# Conversations may start without a document; retrieval returns no chunks and the LLM still answers.
+		# Document-grounded only: no qualifying chunks → strict refusal (no general LLM).
 		try:
 			from ai_engine.services.rag import RAGPipeline
 
@@ -131,6 +157,8 @@ class ChatAskView(generics.CreateAPIView):
 				conversation=conversation,
 				top_k=top_k,
 				save_log=True,
+				min_similarity=min_similarity,
+				retrieval_user=request.user,
 			)
 		except Exception as exc:
 			logger.exception(f'RAG pipeline failed: {exc}')
@@ -157,6 +185,11 @@ class ChatAskView(generics.CreateAPIView):
 					'model': chat_response.model_used,
 					'tokens': chat_response.tokens_used,
 					'retrieval_confidence': chat_response.retrieval_confidence,
+					'confidence': getattr(chat_response, 'confidence', chat_response.retrieval_confidence),
+					'confidence_percent': round(
+						float(getattr(chat_response, 'confidence', chat_response.retrieval_confidence)) * 100.0,
+						2,
+					),
 					'warnings': chat_response.warnings,
 					'query_log_id': chat_response.query_log_id,
 				},
@@ -205,8 +238,8 @@ class AskView(generics.GenericAPIView):
 	POST /api/v1/ask/
 	{
 		"query": "What does the Commercial Code say about partnerships?",
-		"top_k": 5,                # optional, 1..20, default 5
-		"min_similarity": 0.0      # optional, 0.0..1.0, default 0.0
+		"top_k": 3,
+		"min_similarity": 0.2
 	}
 
 	Response 200:
@@ -237,8 +270,8 @@ class AskView(generics.GenericAPIView):
 		serializer.is_valid(raise_exception=True)
 
 		query = serializer.validated_data['query']
-		top_k = serializer.validated_data.get('top_k', 5)
-		min_similarity = serializer.validated_data.get('min_similarity', 0.0)
+		top_k = serializer.validated_data.get('top_k', 3)
+		min_similarity = serializer.validated_data.get('min_similarity', _default_min_similarity())
 
 		recent_count = _record_ask_call(request.user.id)
 		logger.info(
