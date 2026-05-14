@@ -6,18 +6,28 @@ from typing import TYPE_CHECKING
 
 from django.conf import settings
 
+from ai_engine.confidence import (
+    LOW_EVIDENCE_MAX_SIMILARITY,
+    MIN_ANSWER_MAX_SIMILARITY,
+    calculate_confidence,
+    confidence_percent_to_unit,
+    max_bracket_citation_index,
+)
 from ai_engine.models import DocumentChunk, QueryLog
 from ai_engine.query_classification import (
     ASK_GREETING_RESPONSE,
     ASK_OUT_OF_SCOPE_RESPONSE,
-    LEGAL_NO_CONTEXT_RESPONSE,
     classify_intent,
 )
 from ai_engine.services.llm import LLMError, generate_completion
 from ai_engine.services.search import semantic_search
 from ai_engine.strict_grounding import (
-    GENERAL_KNOWLEDGE_FALLBACK_SYSTEM_PROMPT,
     STRICT_LEGAL_SYSTEM_PROMPT,
+    STRICT_NO_RETRIEVAL_ANSWER,
+    answer_signals_insufficient_documents,
+    cap_confidence_when_absence_indicated,
+    format_source_citation_label,
+    legal_response_has_required_structure,
 )
 
 if TYPE_CHECKING:
@@ -29,14 +39,16 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = STRICT_LEGAL_SYSTEM_PROMPT
 
+_QA_LOW_EVIDENCE_NOTE = '⚠️ Note: Limited supporting evidence found in documents.'
+
 DEFAULT_TOP_K = int(getattr(settings, 'RAG_DEFAULT_TOP_K', 3))
 DEFAULT_MIN_SIMILARITY = float(getattr(settings, 'RAG_MIN_SIMILARITY', 0.2))
 MAX_CONTEXT_CHARS = 10_000
 
 
 def _confidence_percent(confidence: float) -> float:
-	"""Human-readable percent (0–100) from cosine or routing score in ``[0, 1]``."""
-	return round(float(confidence) * 100.0, 2)
+    """Human-readable percent (0–100) from a 0–1 routing or cosine score."""
+    return round(float(confidence) * 100.0, 1)
 
 
 def _deterministic_response(
@@ -78,8 +90,8 @@ def _deterministic_response(
 
 def _build_context(chunks: list[DocumentChunk], max_chars: int) -> tuple[str, list[DocumentChunk]]:
     """
-    Render the retrieved chunks into a single ``[Source N]``-labelled context
-    block, truncating once ``max_chars`` is reached.
+    Render the retrieved chunks into a single bracket-numbered context block,
+    truncating once ``max_chars`` is reached.
 
     Returns the context string and the list of chunks actually used (so the
     caller can report only the sources that influenced the answer).
@@ -89,8 +101,9 @@ def _build_context(chunks: list[DocumentChunk], max_chars: int) -> tuple[str, li
     total = 0
     for idx, chunk in enumerate(chunks, start=1):
         document_title = getattr(chunk.document, 'title', None) if chunk.document_id else None
-        label = document_title or f'Document #{chunk.document_id}'
-        segment = f'[Source {idx}: {label}]\n{chunk.content}'
+        md = getattr(chunk, 'metadata', None)
+        header = format_source_citation_label(idx, document_title, md)
+        segment = f'{header}\n{chunk.content}'
         if total + len(segment) > max_chars and parts:
             break
         parts.append(segment)
@@ -104,11 +117,13 @@ def _build_sources(chunks: list[DocumentChunk]) -> list[dict]:
     sources: list[dict] = []
     for idx, chunk in enumerate(chunks, start=1):
         document_title = getattr(chunk.document, 'title', None) if chunk.document_id else None
+        citation_label = format_source_citation_label(idx, document_title, getattr(chunk, 'metadata', None))
         sources.append({
             'source_number': idx,
             'chunk_id': int(chunk.id),
             'document_id': int(chunk.document_id),
             'document_title': document_title,
+            'citation_label': citation_label,
             'relevance': round(float(getattr(chunk, 'relevance_score', 0.0)), 4),
             'excerpt': chunk.content[:200],
             'source': 'admin'
@@ -134,10 +149,11 @@ def generate_answer(
 
     Legal or unknown queries run ``semantic_search``; strict RAG when chunks qualify.
 
-    ``confidence`` is ``1.0`` for greeting / out-of-scope short-circuits, ``0.0`` when
-    nothing qualifies, otherwise the **maximum** cosine among chunks used for the
-    LLM (``retrieval_confidence`` stays the **mean** for analytics). ``confidence_percent``
-    is ``round(confidence * 100, 2)``.
+    ``retrieval_confidence`` is the mean cosine similarity of chunks used in context.
+    ``confidence`` is a 0–1 blend of similarity and passage coverage (see
+    :func:`ai_engine.confidence.calculate_confidence`). ``confidence_percent`` is that
+    blend as a percent with one decimal. Greeting / out-of-scope use ``1.0``; strict
+    no-retrieval uses ``0.0``.
     """
     started_at = time.perf_counter()
     warnings: list[str] = []
@@ -207,48 +223,25 @@ def generate_answer(
     if not retrieved:
         latency_ms = int((time.perf_counter() - started_at) * 1000)
         logger.info(
-            'generate_answer: zero chunks above threshold — LLM general-knowledge fallback user=%s',
+            'generate_answer: zero chunks above threshold — strict refusal user=%s',
             getattr(user, 'pk', None),
         )
         warnings.append('No indexed passages met the similarity threshold.')
-        user_prompt = (
-            'No relevant documents were found in the indexed library for this question. '
-            'Answer based on general knowledge only; do not cite specific uploaded files.\n\n'
-            f'Question:\n{stripped}'
-        )
-        model_used = 'unknown'
-        try:
-            from ai_engine.services.llm_client import get_llm_client
-
-            model_used = getattr(get_llm_client(), 'model', 'stub')
-            answer = generate_completion(
-                user_prompt,
-                system_prompt=GENERAL_KNOWLEDGE_FALLBACK_SYSTEM_PROMPT,
-            )
-        except LLMError as exc:
-            logger.exception('generate_answer: LLM fallback error: %s', exc)
-            warnings.append(f'LLM provider error: {exc}')
-            answer = (
-                'No indexed passages matched your question, and the language model is '
-                'temporarily unavailable. Please retry in a moment.'
-            )
-
         query_log_id: int | None = None
         if save_log and user is not None:
             query_log_id = _persist_query_log(
                 user=user,
                 query=stripped,
                 retrieved_chunk_ids=[],
-                answer=answer,
-                model_used=str(model_used),
+                answer=STRICT_NO_RETRIEVAL_ANSWER,
+                model_used='n/a',
                 retrieval_confidence=0.0,
                 latency_ms=latency_ms,
             )
-
         return {
-            'answer': answer,
+            'answer': STRICT_NO_RETRIEVAL_ANSWER,
             'sources': [],
-            'model_used': str(model_used),
+            'model_used': 'n/a',
             'retrieval_confidence': 0.0,
             'confidence': 0.0,
             'confidence_percent': 0.0,
@@ -257,43 +250,124 @@ def generate_answer(
             'query_log_id': query_log_id,
         }
 
-    context_text, used_chunks = _build_context(retrieved, max_chars=max_context_chars)
+    filtered = [
+        c for c in retrieved if float(getattr(c, 'relevance_score', 0.0)) >= MIN_ANSWER_MAX_SIMILARITY
+    ]
+    retrieved_for_llm = filtered[:eff_top_k]
+    if not retrieved_for_llm:
+        latency_ms = int((time.perf_counter() - started_at) * 1000)
+        logger.info('generate_answer: no chunks at or above quality similarity — strict refusal')
+        query_log_id: int | None = None
+        if save_log and user is not None:
+            query_log_id = _persist_query_log(
+                user=user,
+                query=stripped,
+                retrieved_chunk_ids=[],
+                answer=STRICT_NO_RETRIEVAL_ANSWER,
+                model_used='n/a',
+                retrieval_confidence=0.0,
+                latency_ms=latency_ms,
+            )
+        return {
+            'answer': STRICT_NO_RETRIEVAL_ANSWER,
+            'sources': [],
+            'model_used': 'n/a',
+            'retrieval_confidence': 0.0,
+            'confidence': 0.0,
+            'confidence_percent': 0.0,
+            'latency_ms': latency_ms,
+            'warnings': warnings,
+            'query_log_id': query_log_id,
+        }
+
+    context_text, used_chunks = _build_context(retrieved_for_llm, max_chars=max_context_chars)
     if not used_chunks:
         latency_ms = int((time.perf_counter() - started_at) * 1000)
-        logger.info('generate_answer: context build yielded zero chunks; no-context fallback')
-        no_ctx_answer = (
-            LEGAL_NO_CONTEXT_RESPONSE if intent == 'legal' else ASK_OUT_OF_SCOPE_RESPONSE
-        )
-        return _deterministic_response(
-            answer=no_ctx_answer,
-            confidence=0.0,
-            latency_ms=latency_ms,
-            save_log=save_log,
-            user=user,
-            stripped=stripped,
-            warnings=['Context window could not fit retrieved passages; LLM was not called.'],
-        )
+        logger.info('generate_answer: context build yielded zero usable chunks — strict refusal')
+        warnings.append('Context window could not fit retrieved passages; LLM was not called.')
+        query_log_id: int | None = None
+        if save_log and user is not None:
+            query_log_id = _persist_query_log(
+                user=user,
+                query=stripped,
+                retrieved_chunk_ids=[],
+                answer=STRICT_NO_RETRIEVAL_ANSWER,
+                model_used='n/a',
+                retrieval_confidence=0.0,
+                latency_ms=latency_ms,
+            )
+        return {
+            'answer': STRICT_NO_RETRIEVAL_ANSWER,
+            'sources': [],
+            'model_used': 'n/a',
+            'retrieval_confidence': 0.0,
+            'confidence': 0.0,
+            'confidence_percent': 0.0,
+            'latency_ms': latency_ms,
+            'warnings': warnings,
+            'query_log_id': query_log_id,
+        }
 
-    if len(used_chunks) < len(retrieved):
+    if len(used_chunks) < len(retrieved_for_llm):
         warnings.append(
-            f'Context truncated to {len(used_chunks)} of {len(retrieved)} chunks '
+            f'Context truncated to {len(used_chunks)} of {len(retrieved_for_llm)} chunks '
             f'(max_context_chars={max_context_chars}).'
         )
 
-    avg_confidence = sum(
-        float(getattr(c, 'relevance_score', 0.0)) for c in used_chunks
-    ) / max(len(used_chunks), 1)
-    max_confidence = max(float(getattr(c, 'relevance_score', 0.0)) for c in used_chunks)
+    similarities = [float(getattr(c, 'relevance_score', 0.0)) for c in used_chunks]
+    avg_confidence = sum(similarities) / max(len(similarities), 1)
+    max_confidence = max(similarities)
+
+    if max_confidence < MIN_ANSWER_MAX_SIMILARITY:
+        latency_ms = int((time.perf_counter() - started_at) * 1000)
+        logger.info(
+            'generate_answer: max_similarity below quality gate — strict refusal (no LLM) max_sim=%.4f',
+            max_confidence,
+        )
+        query_log_id: int | None = None
+        if save_log and user is not None:
+            query_log_id = _persist_query_log(
+                user=user,
+                query=stripped,
+                retrieved_chunk_ids=[int(c.id) for c in used_chunks],
+                answer=STRICT_NO_RETRIEVAL_ANSWER,
+                model_used='n/a',
+                retrieval_confidence=float(avg_confidence),
+                latency_ms=latency_ms,
+            )
+        logger.info(
+            '[QA_FINAL_CHECK] retrieved_chunks=%s max_similarity=%.4f confidence=%.4f refused=True',
+            [int(c.id) for c in used_chunks],
+            max_confidence,
+            0.0,
+        )
+        return {
+            'answer': STRICT_NO_RETRIEVAL_ANSWER,
+            'sources': [],
+            'model_used': 'n/a',
+            'retrieval_confidence': float(avg_confidence),
+            'confidence': 0.0,
+            'confidence_percent': 0.0,
+            'latency_ms': latency_ms,
+            'warnings': warnings,
+            'query_log_id': query_log_id,
+        }
 
     user_prompt = (
         f'Question:\n{stripped}\n\n'
         f'Context:\n{context_text}\n\n'
-        'Answer using ONLY the context above. If you cannot answer from this context alone, '
-        "respond EXACTLY with: I don't know.\n"
-        'Otherwise cite every factual claim with [Source N] matching the context labels.'
+        'Answer using ONLY the context above. Your reply MUST include exactly these headings '
+        '(with colons): Answer:, Legal Basis:, Explanation:, Sources:\n'
+        'Only cite the provided sources: valid tags are [1] through [N] where N is the number of excerpt '
+        'blocks above. Do not invent or exceed them.\n'
+        'Under Legal Basis: list ONLY provisions that directly answer the question—do not add adjacent '
+        'or related articles unless the question explicitly asks for them.\n'
+        "If you cannot answer from this context alone, reply with ONLY this exact line: I don't know.\n"
+        'Otherwise cite every factual claim using [n] tags matching the bracketed heading before each passage.'
     )
 
     model_used = 'unknown'
+    llm_failed = False
     try:
         from ai_engine.services.llm_client import get_llm_client
 
@@ -302,20 +376,76 @@ def generate_answer(
     except LLMError as exc:
         logger.exception('generate_answer: LLM error: %s', exc)
         warnings.append(f'LLM provider error: {exc}')
+        llm_failed = True
         answer = (
             'I retrieved relevant passages but the language model is temporarily unavailable. '
             'Please retry in a moment.'
         )
 
-    latency_ms = int((time.perf_counter() - started_at) * 1000)
     sources = _build_sources(used_chunks)
+    sources = sources[: len(used_chunks)]
+
+    if llm_failed:
+        confidence_pct = 0.0
+        confidence_unit = 0.0
+    else:
+        raw_answer = answer
+        n = len(used_chunks)
+        citation_ok = max_bracket_citation_index(raw_answer) <= n
+        format_ok = legal_response_has_required_structure(raw_answer) and citation_ok
+        insufficient = answer_signals_insufficient_documents(raw_answer)
+        if not format_ok:
+            if not citation_ok:
+                logger.warning(
+                    'generate_answer: citation index exceeds %s excerpt(s) (max seen=%s)',
+                    n,
+                    max_bracket_citation_index(raw_answer),
+                )
+            answer = STRICT_NO_RETRIEVAL_ANSWER
+            sources = []
+            confidence_pct = 0.0
+            confidence_unit = 0.0
+        elif insufficient:
+            confidence_pct = 0.0
+            confidence_unit = 0.0
+        else:
+            confidence_pct = calculate_confidence(similarities, len(used_chunks))
+            confidence_unit = confidence_percent_to_unit(confidence_pct)
+
+        if confidence_unit > 0.0:
+            confidence_unit = cap_confidence_when_absence_indicated(confidence_unit, raw_answer)
+            confidence_pct = round(confidence_unit * 100, 1)
+
+        if (
+            format_ok
+            and not insufficient
+            and MIN_ANSWER_MAX_SIMILARITY <= max_confidence < LOW_EVIDENCE_MAX_SIMILARITY
+        ):
+            if _QA_LOW_EVIDENCE_NOTE not in warnings:
+                warnings.append(_QA_LOW_EVIDENCE_NOTE)
+            note_block = f'\n\n{_QA_LOW_EVIDENCE_NOTE}'
+            body = (answer or '').rstrip()
+            if _QA_LOW_EVIDENCE_NOTE not in body:
+                answer = body + note_block
+
+    latency_ms = int((time.perf_counter() - started_at) * 1000)
+
+    refused = (answer or '').strip() == STRICT_NO_RETRIEVAL_ANSWER
+    logger.info(
+        '[QA_FINAL_CHECK] retrieved_chunks=%s max_similarity=%.4f confidence=%.4f refused=%s',
+        [int(c.id) for c in used_chunks],
+        max_confidence,
+        float(confidence_unit),
+        refused,
+    )
 
     logger.info(
-        'generate_answer: done user=%s chunks_used=%s avg_sim=%.4f max_sim=%.4f model=%s latency_ms=%s',
+        'generate_answer: done user=%s chunks_used=%s avg_sim=%.4f max_sim=%.4f conf_pct=%s model=%s latency_ms=%s',
         getattr(user, 'pk', None),
         len(used_chunks),
         avg_confidence,
         max_confidence,
+        confidence_pct,
         model_used,
         latency_ms,
     )
@@ -337,8 +467,8 @@ def generate_answer(
         'sources': sources,
         'model_used': str(model_used),
         'retrieval_confidence': float(avg_confidence),
-        'confidence': float(max_confidence),
-        'confidence_percent': _confidence_percent(max_confidence),
+        'confidence': float(confidence_unit),
+        'confidence_percent': float(confidence_pct),
         'latency_ms': latency_ms,
         'warnings': warnings,
         'query_log_id': query_log_id,

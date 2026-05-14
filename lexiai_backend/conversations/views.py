@@ -3,7 +3,7 @@ from __future__ import annotations
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, permissions
 
-from .models import Conversation, ConversationMessage
+from .models import ConversationMessage
 from .permissions import IsConversationOwner
 from .selectors import get_conversation_messages, get_user_conversations
 from .serializers import ConversationMessageSerializer, ConversationSerializer
@@ -24,9 +24,7 @@ class ConversationDetailView(ConversationQuerysetMixin, generics.RetrieveUpdateD
     permission_classes = [permissions.IsAuthenticated, IsConversationOwner]
 
     def get_object(self):
-        conversation = get_object_or_404(Conversation.objects.select_related('document'), pk=self.kwargs['pk'])
-        self.check_object_permissions(self.request, conversation)
-        return conversation
+        return get_object_or_404(get_user_conversations(self.request.user), pk=self.kwargs['pk'])
 
 
 class ConversationMessageListCreateView(generics.ListCreateAPIView):
@@ -36,8 +34,10 @@ class ConversationMessageListCreateView(generics.ListCreateAPIView):
     def get_conversation(self):
         if hasattr(self, '_conversation') and getattr(self, '_conversation') is not None:
             return self._conversation
-        conversation = get_object_or_404(Conversation, pk=self.kwargs['conversation_pk'])
-        self.check_object_permissions(self.request, conversation)
+        conversation = get_object_or_404(
+            get_user_conversations(self.request.user),
+            pk=self.kwargs['conversation_pk'],
+        )
         self._conversation = conversation
         return conversation
 

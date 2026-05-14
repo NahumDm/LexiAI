@@ -158,6 +158,8 @@ export const ChatProvider = ({ children }: { children: ReactNode }) => {
             model: response.data.model_used,
             tokens: response.data.tokens_used,
             retrieval_confidence: response.data.retrieval_confidence,
+            confidence: response.data.confidence,
+            confidence_percent: response.data.confidence_percent,
             warnings: response.data.warnings,
             query_log_id: response.data.query_id ?? undefined,
           },

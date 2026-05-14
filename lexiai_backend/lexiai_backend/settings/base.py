@@ -231,14 +231,8 @@ SIMPLE_JWT = {
 }
 
 CORS_ALLOW_CREDENTIALS = True
-CORS_ALLOWED_ORIGINS = env_list(
-    'CORS_ALLOWED_ORIGINS',
-    ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:8080', 'http://127.0.0.1:8080'],
-)
-CSRF_TRUSTED_ORIGINS = env_list(
-    'CSRF_TRUSTED_ORIGINS',
-    ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:8080', 'http://127.0.0.1:8080'],
-)
+CORS_ALLOWED_ORIGINS = env_list('CORS_ALLOWED_ORIGINS', [])
+CSRF_TRUSTED_ORIGINS = env_list('CSRF_TRUSTED_ORIGINS', [])
 
 EMAIL_BACKEND = env('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
 DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', 'noreply@lexiai.local')
@@ -257,8 +251,8 @@ if REDIS_URL:
         'LOCATION': REDIS_URL,
     }
 
-CELERY_BROKER_URL = env('CELERY_BROKER_URL', REDIS_URL or 'redis://redis:6379/0')
-CELERY_RESULT_BACKEND = env('CELERY_RESULT_BACKEND', REDIS_URL or CELERY_BROKER_URL)
+CELERY_BROKER_URL = env('CELERY_BROKER_URL') or REDIS_URL
+CELERY_RESULT_BACKEND = env('CELERY_RESULT_BACKEND') or CELERY_BROKER_URL
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'

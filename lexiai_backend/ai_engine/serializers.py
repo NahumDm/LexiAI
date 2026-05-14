@@ -55,9 +55,9 @@ class AskResponseSerializer(serializers.Serializer):
 	model_used = serializers.CharField()
 	retrieval_confidence = serializers.FloatField()
 	confidence = serializers.FloatField(
-		help_text='Max cosine among passages used for the answer, or routing score when no LLM.',
+		help_text='Blended similarity + coverage score in [0, 1], or routing score when no LLM.',
 	)
-	confidence_percent = serializers.FloatField(help_text='confidence × 100, rounded to 2 decimals.')
+	confidence_percent = serializers.FloatField(help_text='confidence × 100, rounded to 1 decimal.')
 	latency_ms = serializers.IntegerField()
 	warnings = serializers.ListField(child=serializers.CharField(), required=False, allow_empty=True)
 	query_log_id = serializers.IntegerField(required=False, allow_null=True)

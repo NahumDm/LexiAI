@@ -43,9 +43,23 @@ export function ChatMessage({ message, onFeedback }: ChatMessageProps) {
     ? new Date((message as ConversationMessage).created_at)
     : new Date((message as LegacyMessage).timestamp as string);
 
+  const confidencePct = isNewShape
+    ? (message as ConversationMessage).metadata?.confidence_percent
+    : undefined;
   const confidence = isNewShape
     ? (message as ConversationMessage).metadata?.retrieval_confidence
     : (message as LegacyMessage).confidence;
+
+  const displayConfidenceLabel = (): string | null => {
+    if (confidencePct !== undefined && confidencePct !== null) {
+      return `${Number(confidencePct).toFixed(1)}%`;
+    }
+    if (confidence !== undefined && confidence !== null) {
+      return `${Math.round(confidence * 100)}%`;
+    }
+    return null;
+  };
+  const confidenceLabel = displayConfidenceLabel();
 
   const citations: ChatSource[] | undefined = isNewShape
     ? (message as ConversationMessage).metadata?.sources
@@ -101,10 +115,10 @@ export function ChatMessage({ message, onFeedback }: ChatMessageProps) {
           {!isUser && (
             <div className="mt-2 space-y-2">
               {/* Confidence indicator */}
-              {confidence !== undefined && confidence !== null && (
+              {confidenceLabel !== null && (
                 <div className="confidence-indicator">
                   <Sparkles className="h-3 w-3" />
-                  <span>Confidence: {Math.round(confidence * 100)}%</span>
+                  <span>Confidence: {confidenceLabel}</span>
                 </div>
               )}
 
@@ -229,12 +243,13 @@ export function ChatMessage({ message, onFeedback }: ChatMessageProps) {
 }
 
 function CitationCard({ citation }: { citation: Partial<ChatSource> }) {
+  const title = citation.citation_label || citation.document_title || 'Source';
   return (
     <div className="p-3 bg-citation-bg rounded-lg border border-secondary/20">
       <div className="flex items-start gap-2">
         <FileText className="h-4 w-4 text-secondary mt-0.5 shrink-0" />
         <div>
-          <p className="text-sm font-medium text-foreground">{citation.document_title || 'Source'}</p>
+          <p className="text-sm font-medium text-foreground">{title}</p>
           {citation.excerpt && <p className="text-xs text-muted-foreground truncate">{citation.excerpt}</p>}
           {citation.relevance !== undefined && (
             <p className="text-xs text-secondary mt-1">Relevance: {(citation.relevance * 100).toFixed(0)}%</p>

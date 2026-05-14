@@ -16,17 +16,6 @@ ASK_OUT_OF_SCOPE_RESPONSE = (
 	"I'm focused on legal assistance. Please ask about legal matters."
 )
 
-LEGAL_NO_CONTEXT_RESPONSE = (
-	"I could not find a direct reference in your uploaded legal documents that answers this question.\n\n"
-	"[Not from uploaded documents — general orientation only]\n"
-	"Ethiopian tax and commercial matters are normally governed by specific federal proclamations and "
-	"regulations; thresholds, procedures, and effective dates can change with new legislation. "
-	"For any decision that depends on amounts, dates, or jurisdiction, verify the current official text or "
-	"consult a licensed Ethiopian legal or tax professional.\n\n"
-	"If you upload the relevant instrument or narrow your question (for example, naming the proclamation or "
-	"article), I can search again within those materials."
-)
-
 _OUT_OF_SCOPE_SUBSTRINGS = ("football", "dating", "weather", "movie")
 _LEGAL_SUBSTRINGS = ("tax", "law", "legal", "court", "contract")
 

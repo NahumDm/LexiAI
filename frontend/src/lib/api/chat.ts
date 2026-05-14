@@ -8,6 +8,8 @@ import { apiClient, ApiResponse } from './client';
 export interface ChatSource {
   chunk_id: number;
   document_title: string | null;
+  /** Academic-style line, e.g. `[1] Proclamation – Article 17` */
+  citation_label?: string | null;
   relevance: number;
   excerpt: string;
 }
@@ -22,6 +24,9 @@ export interface ChatResponse {
     total: number;
   };
   retrieval_confidence: number;
+  /** Blended 0–1 score (similarity + coverage); prefer `confidence_percent` for display */
+  confidence?: number;
+  confidence_percent?: number;
   warnings: string[];
   /** Backend QueryLog id — required for thumbs feedback */
   query_id?: number | null;

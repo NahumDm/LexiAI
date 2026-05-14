@@ -263,7 +263,7 @@ class RetrievalService:
 				return doc_hits
 			logger.info(
 				'Retrieval document scope returned 0 qualifying chunks; '
-				'fallback=global+user conversation_id=%s owner_id=%s document_id=%s',
+				'scope=global+user conversation_id=%s owner_id=%s document_id=%s',
 				conversation.id,
 				owner_id,
 				doc.pk,
@@ -271,7 +271,7 @@ class RetrievalService:
 		elif doc is not None:
 			logger.info(
 				'Retrieval attached document has no indexed chunks; '
-				'fallback=global+user conversation_id=%s owner_id=%s document_id=%s',
+				'scope=global+user conversation_id=%s owner_id=%s document_id=%s',
 				conversation.id,
 				owner_id,
 				doc.pk,

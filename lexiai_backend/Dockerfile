@@ -8,14 +8,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential libpq-dev curl \
+    && apt-get install -y --no-install-recommends build-essential libpq-dev curl bash \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt
-RUN pip install --upgrade pip && pip install -r requirements.txt
+RUN pip install --upgrade pip && pip install -r /app/requirements.txt
 
 COPY . /app
 
+WORKDIR /app/lexiai_backend
+
 EXPOSE 8000
 
-CMD ["gunicorn", "lexiai_backend.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3"]
+CMD ["bash", "start.sh"]

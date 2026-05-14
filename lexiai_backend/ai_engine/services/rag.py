@@ -7,11 +7,23 @@ from django.conf import settings
 from django.utils import timezone
 
 from ai_engine.models import QueryLog
+from ai_engine.confidence import (
+	LOW_EVIDENCE_MAX_SIMILARITY,
+	MIN_ANSWER_MAX_SIMILARITY,
+	calculate_confidence,
+	confidence_percent_to_unit,
+	max_bracket_citation_index,
+)
 from ai_engine.query_classification import (
 	ASK_GREETING_RESPONSE,
 	ASK_OUT_OF_SCOPE_RESPONSE,
-	LEGAL_NO_CONTEXT_RESPONSE,
 	classify_intent,
+)
+from ai_engine.strict_grounding import (
+	STRICT_NO_RETRIEVAL_ANSWER,
+	answer_signals_insufficient_documents,
+	cap_confidence_when_absence_indicated,
+	legal_response_has_required_structure,
 )
 from ai_engine.services.embedding import EmbeddingService
 from ai_engine.services.llm_client import ChatResponse, LLMClient
@@ -22,19 +34,30 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_LOW_EVIDENCE_NOTE = '⚠️ Note: Limited supporting evidence found in documents.'
+
+
+def _rag_final_check(
+	*,
+	chunk_ids: list[int],
+	max_similarity: float,
+	confidence: float,
+	refused: bool,
+) -> None:
+	logger.info(
+		'[RAG_FINAL_CHECK] retrieved_chunks=%s max_similarity=%.4f confidence=%.4f refused=%s',
+		chunk_ids,
+		max_similarity,
+		confidence,
+		refused,
+	)
+
 
 def _get_pipeline_llm() -> LLMClient:
 	"""Resolve LLM client from Django settings (see AI_LLM_BACKEND, MISTRAL_*)."""
 	from ai_engine.services.llm_client import get_llm_client
 
 	return get_llm_client()
-
-
-def _no_passages_answer_for_intent(intent: str) -> tuple[str, float]:
-	"""Deterministic body when nothing qualifies; mirrors ``generate_answer`` routing."""
-	if intent == 'legal':
-		return LEGAL_NO_CONTEXT_RESPONSE, 0.0
-	return ASK_OUT_OF_SCOPE_RESPONSE, 0.0
 
 
 def _deterministic_chat_response(
@@ -47,16 +70,18 @@ def _deterministic_chat_response(
 	warnings: list[str],
 	answer: str,
 	retrieval_confidence: float,
+	confidence: float | None = None,
 ) -> ChatResponse:
-	"""Return a document-grounded reply without calling the LLM."""
+	"""Return a reply without calling the LLM."""
 	latency_ms = int((timezone.now() - start_time).total_seconds() * 1000)
+	conf = float(confidence) if confidence is not None else float(retrieval_confidence)
 	response = ChatResponse(
 		answer=answer,
 		sources=[],
 		model_used='n/a',
 		tokens_used={'prompt': 0, 'completion': 0, 'total': 0},
 		retrieval_confidence=float(retrieval_confidence),
-		confidence=float(retrieval_confidence),
+		confidence=conf,
 		warnings=warnings,
 	)
 	if save_log:
@@ -86,9 +111,9 @@ class RAGPipeline:
 	Orchestrates document-grounded RAG.
 
 	Rule-based intent (greeting / out-of-scope) short-circuits before retrieval.
-	When passages qualify, the LLM answers strictly from context. When nothing
-	meets the similarity floor, the LLM still runs with a general-knowledge fallback
-	prompt (not a hardcoded refusal).
+	When passages qualify and max similarity meets the quality gate, the LLM answers
+	from context only; otherwise the pipeline returns a deterministic refusal without
+	calling the model.
 	"""
 
 	def __init__(self, llm_client: LLMClient | None = None):
@@ -139,6 +164,7 @@ class RAGPipeline:
 		work = (query or '').strip()
 		if not work:
 			logger.info('RAG[1/5] empty query — skipping retrieval')
+			_rag_final_check(chunk_ids=[], max_similarity=0.0, confidence=0.0, refused=True)
 			return _deterministic_chat_response(
 				start_time=start_time,
 				conversation=conversation,
@@ -148,11 +174,13 @@ class RAGPipeline:
 				warnings=['Query was empty.'],
 				answer='',
 				retrieval_confidence=0.0,
+				confidence=0.0,
 			)
 
 		intent = classify_intent(work)
 		if intent == 'greeting':
 			logger.info('RAG[1/5] intent=greeting — skipping retrieval')
+			_rag_final_check(chunk_ids=[], max_similarity=-1.0, confidence=1.0, refused=False)
 			return _deterministic_chat_response(
 				start_time=start_time,
 				conversation=conversation,
@@ -162,9 +190,11 @@ class RAGPipeline:
 				warnings=['Intent=greeting; retrieval skipped.'],
 				answer=ASK_GREETING_RESPONSE,
 				retrieval_confidence=1.0,
+				confidence=1.0,
 			)
 		if intent == 'out_of_scope':
 			logger.info('RAG[1/5] intent=out_of_scope — skipping retrieval')
+			_rag_final_check(chunk_ids=[], max_similarity=-1.0, confidence=1.0, refused=False)
 			return _deterministic_chat_response(
 				start_time=start_time,
 				conversation=conversation,
@@ -174,6 +204,7 @@ class RAGPipeline:
 				warnings=['Intent=out_of_scope; retrieval skipped.'],
 				answer=ASK_OUT_OF_SCOPE_RESPONSE,
 				retrieval_confidence=1.0,
+				confidence=1.0,
 			)
 
 		query_embedding = None
@@ -203,7 +234,7 @@ class RAGPipeline:
 			)
 		except Exception as exc:
 			logger.exception('RAG[3/5] retrieval failed: %s', exc)
-			msg, conf = _no_passages_answer_for_intent(intent)
+			_rag_final_check(chunk_ids=[], max_similarity=0.0, confidence=0.0, refused=True)
 			return _deterministic_chat_response(
 				start_time=start_time,
 				conversation=conversation,
@@ -211,75 +242,167 @@ class RAGPipeline:
 				query_embedding=query_embedding,
 				save_log=save_log,
 				warnings=[f'Retrieval error: {exc}'],
-				answer=msg,
-				retrieval_confidence=conf,
+				answer=STRICT_NO_RETRIEVAL_ANSWER,
+				retrieval_confidence=0.0,
+				confidence=0.0,
 			)
 
 		if not retrieved_chunks:
-			logger.info('RAG[3/5] zero chunks above threshold — LLM general-knowledge fallback')
-			try:
-				response = self.llm_client.generate_response(
-					query=work,
-					context_chunks=[],
-				)
-				response.retrieval_confidence = 0.0
-				response.confidence = 0.0
-			except Exception as exc:
-				logger.error('RAG[3/5] LLM fallback failed: %s', exc)
-				raise
-
-			latency_ms = int((timezone.now() - start_time).total_seconds() * 1000)
-			logger.info(
-				'RAG[4/5] llm fallback ok model=%s answer_chars=%s',
-				response.model_used,
-				len(response.answer or ''),
+			logger.info('RAG[3/5] zero chunks — strict refusal (no LLM)')
+			_rag_final_check(chunk_ids=[], max_similarity=0.0, confidence=0.0, refused=True)
+			return _deterministic_chat_response(
+				start_time=start_time,
+				conversation=conversation,
+				query=work,
+				query_embedding=query_embedding,
+				save_log=save_log,
+				warnings=[],
+				answer=STRICT_NO_RETRIEVAL_ANSWER,
+				retrieval_confidence=0.0,
+				confidence=0.0,
 			)
-			logger.info('RAG[5/5] complete latency_ms=%s (no retrieval)', latency_ms)
 
-			if save_log:
-				try:
-					log = QueryLog.objects.create(
-						user=conversation.owner,
-						conversation=conversation,
-						query_text=work,
-						query_embedding=EmbeddingService.embedding_to_bytes(query_embedding)
-						if query_embedding is not None
-						else None,
-						retrieved_chunk_ids=[],
-						llm_response=response.answer,
-						llm_model=response.model_used,
-						retrieval_confidence=0.0,
-						latency_ms=latency_ms,
-						token_usage=response.tokens_used,
-					)
-					response.query_log_id = log.id
-					logger.info('Logged query to QueryLog id=%s preview=%r', log.id, work[:50])
-				except Exception as exc:
-					logger.error('Failed to log query: %s', exc)
+		filtered = [
+			c for c in retrieved_chunks if float(c.relevance_score) >= MIN_ANSWER_MAX_SIMILARITY
+		]
+		context_chunks = filtered[:eff_top_k]
+		if not context_chunks:
+			logger.info('RAG[3/5] no chunks at or above quality similarity — strict refusal (no LLM)')
+			_rag_final_check(
+				chunk_ids=[c.chunk.id for c in retrieved_chunks],
+				max_similarity=max(float(c.relevance_score) for c in retrieved_chunks),
+				confidence=0.0,
+				refused=True,
+			)
+			return _deterministic_chat_response(
+				start_time=start_time,
+				conversation=conversation,
+				query=work,
+				query_embedding=query_embedding,
+				save_log=save_log,
+				warnings=[],
+				answer=STRICT_NO_RETRIEVAL_ANSWER,
+				retrieval_confidence=0.0,
+				confidence=0.0,
+			)
 
-			return response
+		similarities = [float(chunk.relevance_score) for chunk in context_chunks]
+		avg_confidence = sum(similarities) / len(similarities)
+		max_confidence = max(similarities)
+		chunk_ids_all = [c.chunk.id for c in context_chunks]
 
-		avg_confidence = sum(chunk.relevance_score for chunk in retrieved_chunks) / len(retrieved_chunks)
-		max_confidence = max(chunk.relevance_score for chunk in retrieved_chunks)
+		if max_confidence < MIN_ANSWER_MAX_SIMILARITY:
+			logger.info(
+				'RAG[3/5] max_similarity below quality gate — strict refusal (no LLM) max_sim=%.4f',
+				max_confidence,
+			)
+			_rag_final_check(
+				chunk_ids=chunk_ids_all,
+				max_similarity=max_confidence,
+				confidence=0.0,
+				refused=True,
+			)
+			return _deterministic_chat_response(
+				start_time=start_time,
+				conversation=conversation,
+				query=work,
+				query_embedding=query_embedding,
+				save_log=save_log,
+				warnings=[],
+				answer=STRICT_NO_RETRIEVAL_ANSWER,
+				retrieval_confidence=0.0,
+				confidence=0.0,
+			)
+
+		logger.info(
+			'RAG[3/5] context for LLM: n=%s (top_k=%s) ids_scores=%s',
+			len(context_chunks),
+			eff_top_k,
+			[(c.chunk.id, round(c.relevance_score, 4)) for c in context_chunks],
+		)
 
 		try:
 			response = self.llm_client.generate_response(
 				query=work,
-				context_chunks=retrieved_chunks,
-			)
-			response.retrieval_confidence = avg_confidence
-			response.confidence = max_confidence
-			logger.info(
-				'RAG[4/5] llm ok model=%s answer_chars=%s warnings=%s max_sim=%.4f avg_sim=%.4f',
-				response.model_used,
-				len(response.answer or ''),
-				len(response.warnings or []),
-				max_confidence,
-				avg_confidence,
+				context_chunks=context_chunks,
 			)
 		except Exception as exc:
 			logger.error('LLM generation failed: %s', exc)
 			raise
+
+		n = len(context_chunks)
+		response.sources = (response.sources or [])[:n]
+
+		raw_answer = response.answer
+		citation_ok = max_bracket_citation_index(raw_answer) <= n
+		if not citation_ok:
+			logger.warning(
+				'RAG: model reply rejected — citation index exceeds %s provided excerpt(s) (max seen=%s)',
+				n,
+				max_bracket_citation_index(raw_answer),
+			)
+			response.answer = STRICT_NO_RETRIEVAL_ANSWER
+			response.sources = []
+			response.warnings = list(response.warnings or [])
+
+		format_ok = legal_response_has_required_structure(raw_answer) and citation_ok
+		insufficient = answer_signals_insufficient_documents(raw_answer)
+		if not format_ok:
+			logger.warning('RAG: model reply rejected — missing required legal headings (no LLM retry)')
+			response.answer = STRICT_NO_RETRIEVAL_ANSWER
+			response.sources = []
+			response.warnings = list(response.warnings or [])
+
+		refused_answer = (response.answer or '').strip() == STRICT_NO_RETRIEVAL_ANSWER
+		if insufficient and format_ok:
+			confidence_pct = 0.0
+			confidence_unit = 0.0
+		elif not format_ok or refused_answer:
+			confidence_pct = 0.0
+			confidence_unit = 0.0
+		else:
+			confidence_pct = calculate_confidence(similarities, n)
+			confidence_unit = confidence_percent_to_unit(confidence_pct)
+
+		if confidence_unit > 0.0:
+			confidence_unit = cap_confidence_when_absence_indicated(confidence_unit, raw_answer)
+			confidence_pct = round(confidence_unit * 100, 1)
+
+		response.retrieval_confidence = avg_confidence
+		response.confidence = confidence_unit
+
+		wlist = list(response.warnings or [])
+		if (
+			format_ok
+			and not refused_answer
+			and not insufficient
+			and MIN_ANSWER_MAX_SIMILARITY <= max_confidence < LOW_EVIDENCE_MAX_SIMILARITY
+		):
+			if _LOW_EVIDENCE_NOTE not in wlist:
+				wlist.append(_LOW_EVIDENCE_NOTE)
+			note_block = f'\n\n{_LOW_EVIDENCE_NOTE}'
+			body = (response.answer or '').rstrip()
+			if _LOW_EVIDENCE_NOTE not in body:
+				response.answer = body + note_block
+		response.warnings = wlist
+
+		refused = refused_answer or not format_ok
+		_rag_final_check(
+			chunk_ids=chunk_ids_all,
+			max_similarity=max_confidence,
+			confidence=float(response.confidence),
+			refused=refused,
+		)
+
+		logger.info(
+			'RAG[4/5] llm ok model=%s answer_chars=%s warnings=%s max_sim=%.4f avg_sim=%.4f conf_unit=%.4f',
+			response.model_used,
+			len(response.answer or ''),
+			len(response.warnings or []),
+			max_confidence,
+			avg_confidence,
+			response.confidence,
+		)
 
 		latency_ms = int((timezone.now() - start_time).total_seconds() * 1000)
 		logger.info(
@@ -298,7 +421,7 @@ class RAGPipeline:
 					query_embedding=EmbeddingService.embedding_to_bytes(query_embedding)
 					if query_embedding is not None
 					else None,
-					retrieved_chunk_ids=[chunk.chunk.id for chunk in retrieved_chunks],
+					retrieved_chunk_ids=[chunk.chunk.id for chunk in context_chunks],
 					llm_response=response.answer,
 					llm_model=response.model_used,
 					retrieval_confidence=avg_confidence,

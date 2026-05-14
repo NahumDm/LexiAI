@@ -6,7 +6,7 @@ import os
 from celery import Celery
 from celery.signals import task_failure, task_prerun, worker_process_init
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'lexiai_backend.settings.dev')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'lexiai_backend.settings.prod')
 
 logger = logging.getLogger(__name__)
 

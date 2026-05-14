@@ -73,7 +73,7 @@ def _chat_response_to_response_body(chat_response) -> dict:
 		},
 		'retrieval_confidence': float(_json_native(chat_response.retrieval_confidence)),
 		'confidence': conf,
-		'confidence_percent': round(conf * 100.0, 2),
+		'confidence_percent': round(conf * 100.0, 1),
 		'warnings': [str(w) for w in (chat_response.warnings or [])],
 		'query_id': int(chat_response.query_log_id) if chat_response.query_log_id is not None else None,
 	}
@@ -91,8 +91,8 @@ class ChatAskView(generics.CreateAPIView):
 	}
 
 	Does not require conversation.document; retrieval prefers attached document, else the owner's library.
-	If no passages meet the similarity threshold, returns a professional
-	no-context or redirect message — no general-knowledge LLM fallback.
+	If no passages meet the similarity threshold (or quality gates fail),
+	returns a strict document-only refusal with no ungrounded LLM answer.
 	"""
 	serializer_class = ChatQuerySerializer
 	permission_classes = [permissions.IsAuthenticated, IsConversationOwner]
@@ -188,7 +188,7 @@ class ChatAskView(generics.CreateAPIView):
 					'confidence': getattr(chat_response, 'confidence', chat_response.retrieval_confidence),
 					'confidence_percent': round(
 						float(getattr(chat_response, 'confidence', chat_response.retrieval_confidence)) * 100.0,
-						2,
+						1,
 					),
 					'warnings': chat_response.warnings,
 					'query_log_id': chat_response.query_log_id,

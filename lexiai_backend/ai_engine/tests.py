@@ -3,6 +3,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
+from django.test import SimpleTestCase
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -12,6 +13,7 @@ from ai_engine.query_classification import (
 	ASK_OUT_OF_SCOPE_RESPONSE,
 )
 from ai_engine.services.qa import generate_answer
+from ai_engine.strict_grounding import STRICT_NO_RETRIEVAL_ANSWER
 from ai_engine.services.chunking import ChunkingService
 from ai_engine.services.embedding import EmbeddingService
 from ai_engine.services.retrieval import RetrievalService
@@ -278,6 +280,31 @@ class QueryLogTests(APITestCase):
 		self.assertEqual(log.latency_ms, 250)
 
 
+_COMPLIANT_TWO_CHUNK_ANSWER = (
+	'Answer:\n'
+	'Combined.\n\n'
+	'Legal Basis:\n'
+	'- [1] First passage.\n'
+	'- [2] Second passage.\n\n'
+	'Explanation:\n'
+	'Both passages support the answer.\n\n'
+	'Sources:\n'
+	'[1] A\n'
+	'[2] A\n'
+)
+
+_COMPLIANT_ONE_CHUNK_ANSWER = (
+	'Answer:\n'
+	'Under [1], the rule applies.\n\n'
+	'Legal Basis:\n'
+	'- [1] Federal Income Tax Proclamation\n\n'
+	'Explanation:\n'
+	'Penalties follow from the cited passage.\n\n'
+	'Sources:\n'
+	'[1] Federal Income Tax Proclamation\n'
+)
+
+
 class AskGenerateAnswerRoutingTests(APITestCase):
 	"""Deterministic /ask routing when retrieval is empty or strict RAG when chunks exist."""
 
@@ -301,28 +328,26 @@ class AskGenerateAnswerRoutingTests(APITestCase):
 		self.assertEqual(out['sources'], [])
 		mock_search.assert_not_called()
 
-	@patch('ai_engine.services.qa.generate_completion', return_value='General knowledge fallback answer.')
 	@patch('ai_engine.services.qa.semantic_search')
-	def test_legal_no_chunks_uses_llm_fallback(self, mock_search, _mock_llm):
+	def test_legal_no_chunks_strict_refusal(self, mock_search):
 		mock_search.return_value = ([], 0.0)
 		out = generate_answer('What are the penalties for tax evasion?', user=self.user, save_log=False)
-		self.assertEqual(out['answer'], 'General knowledge fallback answer.')
+		self.assertEqual(out['answer'], STRICT_NO_RETRIEVAL_ANSWER)
 		self.assertEqual(out['confidence'], 0.0)
 		self.assertEqual(out['sources'], [])
 		mock_search.assert_called_once()
 
-	@patch('ai_engine.services.qa.generate_completion', return_value='General knowledge fallback answer.')
 	@patch('ai_engine.services.qa.semantic_search')
-	def test_unknown_no_chunks_uses_llm_fallback(self, mock_search, _mock_llm):
+	def test_unknown_no_chunks_strict_refusal(self, mock_search):
 		mock_search.return_value = ([], 0.0)
 		out = generate_answer('Who won the world cup?', user=self.user, save_log=False)
-		self.assertEqual(out['answer'], 'General knowledge fallback answer.')
+		self.assertEqual(out['answer'], STRICT_NO_RETRIEVAL_ANSWER)
 		self.assertEqual(out['confidence'], 0.0)
 		mock_search.assert_called_once()
 
-	@patch('ai_engine.services.qa.generate_completion', return_value='Combined [Source 1] and [Source 2].')
+	@patch('ai_engine.services.qa.generate_completion', return_value=_COMPLIANT_TWO_CHUNK_ANSWER)
 	@patch('ai_engine.services.qa.semantic_search')
-	def test_strict_rag_confidence_is_max_over_used_chunks(self, mock_search, _mock_llm):
+	def test_strict_rag_confidence_blended(self, mock_search, _mock_llm):
 		c1 = MagicMock()
 		c1.id = 1
 		c1.document_id = 1
@@ -339,11 +364,11 @@ class AskGenerateAnswerRoutingTests(APITestCase):
 		c2.relevance_score = 0.9
 		mock_search.return_value = ([c1, c2], 0.9)
 		out = generate_answer('What does the tax law say?', user=self.user, save_log=False)
-		self.assertEqual(out['confidence'], 0.9)
-		self.assertEqual(out['confidence_percent'], 90.0)
+		self.assertAlmostEqual(out['confidence'], 0.892, places=5)
+		self.assertEqual(out['confidence_percent'], 89.2)
 		self.assertAlmostEqual(out['retrieval_confidence'], 0.7, places=5)
 
-	@patch('ai_engine.services.qa.generate_completion', return_value='Under [Source 1], the rule applies.')
+	@patch('ai_engine.services.qa.generate_completion', return_value=_COMPLIANT_ONE_CHUNK_ANSWER)
 	@patch('ai_engine.services.qa.semantic_search')
 	def test_strict_rag_uses_chunk_similarity_confidence(self, mock_search, _mock_llm):
 		ch = MagicMock()
@@ -359,8 +384,54 @@ class AskGenerateAnswerRoutingTests(APITestCase):
 			user=self.user,
 			save_log=False,
 		)
-		self.assertIn('[Source 1]', out['answer'])
-		self.assertEqual(out['confidence'], 0.78)
-		self.assertEqual(out['confidence_percent'], 78.0)
+		self.assertIn('[1]', out['answer'])
+		self.assertAlmostEqual(out['confidence'], 0.8584, places=3)
+		self.assertEqual(out['confidence_percent'], 85.8)
 		self.assertEqual(len(out['sources']), 1)
 		self.assertEqual(out['sources'][0]['relevance'], 0.78)
+		self.assertIn('[1]', out['sources'][0]['citation_label'])
+
+	@patch('ai_engine.services.qa.generate_completion')
+	@patch('ai_engine.services.qa.semantic_search')
+	def test_max_similarity_below_gate_no_llm(self, mock_search, mock_llm):
+		ch = MagicMock()
+		ch.id = 99
+		ch.document_id = 1
+		ch.document = MagicMock()
+		ch.document.title = 'Doc'
+		ch.content = 'Marginal match text.'
+		ch.relevance_score = 0.34
+		mock_search.return_value = ([ch], 0.34)
+		out = generate_answer('What does the tax law say about rates?', user=self.user, save_log=False)
+		self.assertEqual(out['answer'], STRICT_NO_RETRIEVAL_ANSWER)
+		self.assertEqual(out['sources'], [])
+		self.assertEqual(out['confidence'], 0.0)
+		mock_llm.assert_not_called()
+
+
+class ConfidenceFormulaTests(SimpleTestCase):
+	def test_calculate_confidence_zero_when_max_below_gate(self):
+		from ai_engine.confidence import calculate_confidence
+
+		self.assertEqual(calculate_confidence([0.34], 1), 0.0)
+
+	def test_max_bracket_citation_index(self):
+		from ai_engine.confidence import max_bracket_citation_index
+
+		self.assertEqual(max_bracket_citation_index('See [1] and [2].'), 2)
+		self.assertEqual(max_bracket_citation_index('No cites'), 0)
+
+	def test_bucketed_confidence_top_band_caps_at_92(self):
+		from ai_engine.confidence import calculate_confidence
+
+		self.assertEqual(calculate_confidence([1.0, 1.0, 1.0, 1.0, 1.0], 5), 92.0)
+
+	def test_absence_cap_reduces_high_bucket(self):
+		from ai_engine.strict_grounding import cap_confidence_when_absence_indicated
+
+		self.assertEqual(cap_confidence_when_absence_indicated(0.89, 'There is no explicit regulation.'), 0.4)
+
+	def test_absence_cap_ignores_when_no_phrase(self):
+		from ai_engine.strict_grounding import cap_confidence_when_absence_indicated
+
+		self.assertEqual(cap_confidence_when_absence_indicated(0.89, 'Article 17 applies.'), 0.89)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -10,13 +11,22 @@ if TYPE_CHECKING:
 	from ai_engine.services.retrieval import RetrievedChunk
 
 from ai_engine.strict_grounding import (
-	GENERAL_KNOWLEDGE_FALLBACK_SYSTEM_PROMPT,
 	STRICT_LEGAL_SYSTEM_PROMPT,
+	STRICT_NO_RETRIEVAL_ANSWER,
+	format_source_citation_label,
 )
 
 logger = logging.getLogger(__name__)
 
 CONFIDENCE_THRESHOLD = 0.35
+
+
+def _answer_has_citation_tags(answer: str) -> bool:
+	if not answer:
+		return False
+	if '[Source' in answer:
+		return True
+	return bool(re.search(r'\[\d+\]', answer))
 
 # Common placeholder values that indicate "no real key configured yet". Treated as missing.
 _PLACEHOLDER_KEYS = frozenset({
@@ -54,8 +64,9 @@ def _is_real_secret(value: str | None) -> bool:
 class ChatResponse:
 	"""Response from LLM with answer and source metadata.
 
-	``retrieval_confidence`` is the mean cosine across retrieved chunks (logging).
-	``confidence`` is the max cosine among those chunks (UX; matches ``/ask/``).
+	``retrieval_confidence`` is the mean cosine across retrieved chunks (analytics).
+	``confidence`` is the blended 0–1 score from :func:`ai_engine.confidence.calculate_confidence`
+	(applied by the RAG pipeline after generation).
 	"""
 
 	answer: str
@@ -103,17 +114,10 @@ class StubLLMClient(LLMClient):
 		"""
 		sources = []
 		warnings = []
-	
+
 		if not context_chunks:
-			warnings.append(
-				'No document passages met the similarity threshold; answering from general knowledge (stub).',
-			)
 			return ChatResponse(
-				answer=(
-					'(General knowledge — no indexed passages above threshold.) '
-					f'Question summary: {query.strip()[:280]!r}\n'
-					'Configure MISTRAL_API_KEY / MISTRAL_BASE_URL for full LLM answers.'
-				),
+				answer=STRICT_NO_RETRIEVAL_ANSWER,
 				sources=[],
 				model_used='stub-v1',
 				tokens_used={'prompt': 0, 'completion': 0, 'total': 0},
@@ -130,23 +134,28 @@ class StubLLMClient(LLMClient):
 		for idx, retrieved in enumerate(context_chunks, start=1):
 			chunk = retrieved.chunk
 			document_title = getattr(chunk.document, 'title', None) if getattr(chunk, 'document', None) else None
+			md = getattr(chunk, 'metadata', None)
+			citation_label = format_source_citation_label(idx, document_title, md)
 			sources.append({
 				'chunk_id': chunk.id,
 				'document_title': document_title,
+				'citation_label': citation_label,
 				'relevance': round(retrieved.relevance_score, 3),
 				'excerpt': chunk.content[:200],
 				'source': retrieved.source,
 			})
 
-		excerpt_preview = '\n\n'.join(
-			f'[Excerpt {i + 1} — relevance {s["relevance"]}]\n{s["excerpt"]}'
-			for i, s in enumerate(sources[:3])
-		)
+		src_lines = '\n'.join(str(s['citation_label']) for s in sources)
+		tags = ', '.join(f'[{i}]' for i in range(1, len(sources) + 1))
 		answer = (
-			f'Stub LLM (configure Mistral via MISTRAL_API_KEY / MISTRAL_BASE_URL for semantic answers).\n\n'
-			f'Your question: {query}\n\n'
-			f'**Retrieved passages (top {len(sources)}):**\n{excerpt_preview}\n\n'
-			f'Average retrieval score: {avg_confidence:.1%}.'
+			'Answer:\n'
+			'(Development stub) Responses are derived from indexed excerpts only; configure Mistral for production.\n\n'
+			'Legal Basis:\n'
+			f'- Passages {tags} from the provided context.\n\n'
+			'Explanation:\n'
+			f'Question (truncated): {query.strip()[:240]!r}\n\n'
+			'Sources:\n'
+			f'{src_lines}\n'
 		)
 
 		return ChatResponse(
@@ -266,25 +275,11 @@ class MistralLLMClient(LLMClient):
 		sources: list[dict[str, str | int | float]] = []
 
 		if not context_chunks:
-			warnings.append(
-				'No document passages met the similarity threshold; answering from general knowledge.',
-			)
-			system_prompt = GENERAL_KNOWLEDGE_FALLBACK_SYSTEM_PROMPT
-			user_prompt = (
-				'The indexed document library returned no passages above the relevance threshold '
-				'for this question.\n\n'
-				f'User question:\n{query.strip()}'
-			)
-			try:
-				answer, tokens_used = self._chat(system_prompt, user_prompt)
-			except Exception as exc:
-				logger.exception('LLM general-knowledge fallback failed: %s', exc)
-				raise
 			return ChatResponse(
-				answer=answer,
+				answer=STRICT_NO_RETRIEVAL_ANSWER,
 				sources=[],
 				model_used=self.model,
-				tokens_used=tokens_used,
+				tokens_used={'prompt': 0, 'completion': 0, 'total': 0},
 				retrieval_confidence=0.0,
 				confidence=0.0,
 				warnings=warnings,
@@ -302,11 +297,13 @@ class MistralLLMClient(LLMClient):
 			chunk = retrieved.chunk
 			doc = getattr(chunk, 'document', None)
 			document_title = getattr(doc, 'title', None) if doc else None
-			label = document_title or 'Document'
-			context_parts.append(f'[Source {i + 1}: {label}]\n{chunk.content}')
+			md = getattr(chunk, 'metadata', None)
+			header = format_source_citation_label(i + 1, document_title, md)
+			context_parts.append(f'{header}\n{chunk.content}')
 			sources.append({
 				'chunk_id': chunk.id,
 				'document_title': document_title,
+				'citation_label': header,
 				'relevance': round(retrieved.relevance_score, 3),
 				'excerpt': chunk.content[:200],
 				'source': retrieved.source,
@@ -318,14 +315,24 @@ class MistralLLMClient(LLMClient):
 		user_prompt = (
 			f'User question:\n{query.strip()}\n\n'
 			f'Document excerpts:\n{context_text}\n\n'
-			'Answer using ONLY the excerpts above. If you cannot, respond EXACTLY with: I don\'t know.\n'
-			'Otherwise cite every factual claim with [Source N] matching the excerpt labels.'
+			'Answer using ONLY the excerpts above. Your reply MUST include exactly these headings '
+			'(with colons): Answer:, Legal Basis:, Explanation:, Sources:\n'
+			'Only cite the provided sources: valid tags are [1] through [N] where N is the number of excerpt '
+			'blocks above. Do not invent or exceed them.\n'
+			'Under Legal Basis: list ONLY provisions that directly answer the question—do not add adjacent '
+			'or related articles unless the question explicitly asks for them.\n'
+			"If you cannot answer from the excerpts alone, reply with ONLY this exact line: I don't know.\n"
+			'Otherwise cite every factual claim with [n] tags matching the bracketed line at the start '
+			'of each excerpt.'
 		)
 
 		try:
 			answer, tokens_used = self._chat(system_prompt, user_prompt)
-			if avg_confidence < CONFIDENCE_THRESHOLD and '[Source' not in answer:
-				warnings.append('Low retrieval confidence and no explicit [Source] citations in the model reply.')
+			if avg_confidence < CONFIDENCE_THRESHOLD and not _answer_has_citation_tags(answer):
+				warnings.append(
+					'Low retrieval confidence and no explicit bracketed citations ([1], [Source N], etc.) '
+					'in the model reply.'
+				)
 
 			return ChatResponse(
 				answer=answer,
