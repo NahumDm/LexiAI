@@ -1,11 +1,35 @@
 from __future__ import annotations
 
 import logging
+import os
+import sys
 import threading
 
 from django.apps import AppConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _should_skip_embedding_warmup() -> bool:
+    """
+    Do not load SentenceTransformer in the Celery *parent* before prefork children spawn.
+
+    ``docker-compose`` can set ``CELERY_WORKER_SKIP_EMBEDDING_WARMUP=1`` on the worker.
+    We also skip when the process was started as the Celery CLI so local runs match.
+    """
+    if os.environ.get('CELERY_WORKER_SKIP_EMBEDDING_WARMUP', '').lower() in ('1', 'true', 'yes'):
+        return True
+    if os.environ.get('SKIP_EMBEDDING_WARMUP_IN_CELERY', '').lower() in ('1', 'true', 'yes'):
+        return True
+    argv = sys.argv
+    if not argv:
+        return False
+    exe = os.path.basename(argv[0]).lower()
+    if exe == 'celery' or exe.startswith('celery'):
+        return True
+    if len(argv) >= 3 and argv[1] == '-m' and argv[2] == 'celery':
+        return True
+    return False
 
 
 def _warmup_models() -> None:
@@ -40,6 +64,10 @@ class AiEngineConfig(AppConfig):
         from django.conf import settings
 
         if not getattr(settings, 'AI_WARMUP_ON_STARTUP', False):
+            return
+
+        if _should_skip_embedding_warmup():
+            logger.info('warmup: skipped (Celery / fork-safety — model loads per worker child)')
             return
 
         thread = threading.Thread(

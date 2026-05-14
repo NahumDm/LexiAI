@@ -1,21 +1,75 @@
 from __future__ import annotations
 
 import tempfile
-
-from django.contrib.auth import get_user_model
-from django.core.management import call_command
-from django.core.files.uploadedfile import SimpleUploadedFile
 from pathlib import Path
+from unittest.mock import patch
 
+import numpy as np
+from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import TestCase, TransactionTestCase, override_settings
 from rest_framework import status
 from rest_framework.test import APIClient, APITestCase
 
+from ai_engine.models import DocumentChunk
+from ai_engine.tasks import embed_document_chunks
+
 from .models import Document, DocumentIngestionJob
-from .services import resolve_ingestion_source
+from .services import populate_extracted_text_from_source_file, resolve_ingestion_source
 
 User = get_user_model()
+
+
+class UploadIngestionPipelineTests(TestCase):
+	"""End-to-end checks for API uploads where ``extracted_text`` is initially blank."""
+
+	def setUp(self):
+		self.user = User.objects.create_user(email='pipe@example.com', password='password123')
+
+	def test_populate_extracted_text_from_saved_txt_file(self):
+		with tempfile.TemporaryDirectory() as media:
+			with override_settings(MEDIA_ROOT=media):
+				doc = Document(owner=self.user, title='Brief')
+				doc.source_file.save(
+					'b.txt',
+					SimpleUploadedFile('b.txt', b'Alpha beta. Gamma delta.', content_type='text/plain'),
+				)
+				doc.save()
+				self.assertFalse((doc.extracted_text or '').strip())
+				self.assertTrue(populate_extracted_text_from_source_file(doc))
+				doc.refresh_from_db()
+				self.assertIn('Alpha beta', doc.extracted_text)
+
+	@patch('ai_engine.tasks.EmbeddingService.generate_embeddings_batch')
+	def test_embed_task_extracts_chunks_and_sets_ready(self, mock_batch):
+		mock_batch.side_effect = lambda texts: np.zeros((len(texts), 384), dtype=np.float32)
+		with tempfile.TemporaryDirectory() as media:
+			with override_settings(MEDIA_ROOT=media):
+				doc = Document(owner=self.user, title='Brief')
+				doc.source_file.save(
+					'c.txt',
+					SimpleUploadedFile(
+						'c.txt',
+						b'Ethiopian tax law applies to residents. This is sentence two.',
+						content_type='text/plain',
+					),
+				)
+				doc.save()
+				self.assertEqual(doc.status, Document.Status.UPLOADED)
+				embed_document_chunks.apply(args=[doc.pk]).get()
+				doc.refresh_from_db()
+				self.assertEqual(doc.status, Document.Status.READY)
+				self.assertGreaterEqual(DocumentChunk.objects.filter(document=doc).count(), 1)
+				mock_batch.assert_called_once()
+
+	def test_embed_task_marks_failure_when_no_source_file(self):
+		doc = Document.objects.create(owner=self.user, title='Empty', extracted_text='')
+		embed_document_chunks.apply(args=[doc.pk]).get()
+		doc.refresh_from_db()
+		self.assertEqual(doc.status, Document.Status.UPLOADED)
+		self.assertTrue((doc.metadata or {}).get('ingestion_failed'))
 
 
 class ResolveIngestionSourceTests(TestCase):

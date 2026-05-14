@@ -13,6 +13,8 @@ from .models import DocumentIngestionJob
 from .serializers import AdminDocumentSerializer, DocumentIngestionJobSerializer, DocumentSerializer
 from .tasks import process_tax_document_ingestion_job
 
+logger = logging.getLogger(__name__)
+
 
 class DocumentQuerysetMixin:
     def get_queryset(self):
@@ -25,6 +27,12 @@ class DocumentListCreateView(DocumentQuerysetMixin, generics.ListCreateAPIView):
 
     def perform_create(self, serializer):
         document = serializer.save()
+        logger.info(
+            'Document upload received: id=%s owner_id=%s title=%s',
+            document.pk,
+            document.owner_id,
+            document.title,
+        )
         from ai_engine.tasks import embed_document_chunks
 
         transaction.on_commit(lambda: embed_document_chunks.delay(document.pk))
@@ -33,9 +41,6 @@ class DocumentListCreateView(DocumentQuerysetMixin, generics.ListCreateAPIView):
 class DocumentDetailView(DocumentQuerysetMixin, generics.RetrieveUpdateDestroyAPIView):
     serializer_class = DocumentSerializer
     permission_classes = [permissions.IsAuthenticated]
-
-
-logger = logging.getLogger(__name__)
 
 
 class AdminDocumentReprocessView(APIView):

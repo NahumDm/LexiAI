@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Callable
@@ -310,6 +313,94 @@ def extract_document_text(path: Path) -> str:
     if path.suffix.lower() == '.pdf':
         return extract_pdf_text(path)
     return path.read_text(encoding='utf-8', errors='ignore')
+
+
+def _materialize_fieldfile_to_temp_path(field_file) -> Path:
+    """
+    Copy an uploaded FieldFile to a temp path so extract_document_text can
+    read it (works for remote storages where ``FieldFile.path`` is unavailable).
+    Caller must delete the path when finished.
+    """
+    name = getattr(field_file, 'name', '') or 'upload'
+    suffix = Path(name).suffix or '.bin'
+    fd, raw = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
+    dest = Path(raw)
+    with field_file.open('rb') as src, dest.open('wb') as out:
+        shutil.copyfileobj(src, out, length=1024 * 1024)
+    return dest
+
+
+def merge_document_metadata(document: Document, patch: dict) -> None:
+    meta = dict(document.metadata or {})
+    meta.update(patch)
+    document.metadata = meta
+    document.save(update_fields=['metadata', 'updated_at'])
+
+
+def populate_extracted_text_from_source_file(document: Document) -> bool:
+    """
+    Ensure ``document.extracted_text`` is populated when the client uploaded
+    ``source_file`` but left ``extracted_text`` blank (typical PDF upload).
+
+    Returns True when there is non-empty extracted text after this call.
+    On hard failure (missing file, unreadable content, empty extraction),
+    sets ``metadata['ingestion_failed']`` and related keys, saves, and
+    returns False.
+    """
+    if (document.extracted_text or '').strip():
+        logger.info(
+            'Document id=%s: extracted_text already present (length=%s)',
+            document.pk,
+            len(document.extracted_text),
+        )
+        return True
+
+    field = document.source_file
+    if not field or not field.name:
+        logger.warning('Document id=%s: cannot extract — no source_file', document.pk)
+        merge_document_metadata(
+            document,
+            {'ingestion_failed': True, 'ingestion_error': 'missing_source_file'},
+        )
+        return False
+
+    # Always stream bytes via storage (FieldFile.open) into a temp path. Relying on
+    # ``FieldFile.path`` alone breaks when the web process and Celery worker do not
+    # share the same filesystem view for MEDIA_ROOT (or when only the storage API is valid).
+    tmp: Path | None = None
+    try:
+        tmp = _materialize_fieldfile_to_temp_path(field)
+        text = extract_document_text(tmp)
+    except Exception as exc:
+        logger.exception('Document id=%s: text extraction error: %s', document.pk, exc)
+        merge_document_metadata(
+            document,
+            {'ingestion_failed': True, 'ingestion_error': 'extraction_exception', 'ingestion_detail': str(exc)[:500]},
+        )
+        return False
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                logger.warning('Document id=%s: could not remove temp extract path %s', document.pk, tmp)
+
+    text = (text or '').strip()
+    if not text:
+        document.extracted_text = ''
+        meta = dict(document.metadata or {})
+        meta['ingestion_failed'] = True
+        meta['ingestion_error'] = 'empty_or_unreadable_text'
+        document.metadata = meta
+        document.save(update_fields=['extracted_text', 'metadata', 'updated_at'])
+        logger.warning('Document id=%s: extraction produced empty text', document.pk)
+        return False
+
+    document.extracted_text = text
+    document.save(update_fields=['extracted_text', 'updated_at'])
+    logger.info('Document id=%s: text extracted from file (length=%s)', document.pk, len(text))
+    return True
 
 
 def extract_pdf_text(path: Path) -> str:
