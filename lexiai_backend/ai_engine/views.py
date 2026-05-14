@@ -3,7 +3,8 @@ from __future__ import annotations
 import logging
 import numbers
 
-from django.db.models import Avg, Count
+from django.contrib.auth import get_user_model
+from django.db.models import Avg, Count, Q
 from django.utils import timezone
 from datetime import timedelta
 from rest_framework import generics, permissions, status
@@ -12,6 +13,8 @@ from rest_framework.response import Response
 
 from ai_engine.models import QueryFeedback, QueryLog
 from ai_engine.serializers import (
+	AdminQueryFeedbackSerializer,
+	AdminQueryLogSerializer,
 	AskQuerySerializer,
 	AskResponseSerializer,
 	ChatQuerySerializer,
@@ -20,6 +23,9 @@ from ai_engine.serializers import (
 from ai_engine.services.qa import generate_answer
 from conversations.models import Conversation
 from conversations.permissions import IsConversationOwner
+from documents.models import Document
+
+User = get_user_model()
 
 logger = logging.getLogger(__name__)
 
@@ -290,7 +296,33 @@ class ChatFeedbackView(generics.CreateAPIView):
 def analytics_view(request):
 	"""
 	Admin analytics endpoint.
-	GET /api/v1/ai/analytics/
+	GET /api/v1/ai/analytics/?days=<1..90>
+
+	Primary metrics (all-time, GLOBAL — the admin dashboard headline cards):
+	- total_queries, avg_latency_ms, avg_retrieval_confidence from ALL QueryLog rows
+	- helpful_feedback / unhelpful_feedback from ALL QueryFeedback rows
+	- total_documents, total_users from live tables
+
+	The `days` parameter still scopes **additive** period metrics used for
+	trends: total_queries_in_period, active_users_in_period, queries_by_model,
+	helpful_feedback_in_period, etc.
+
+	Response shape (period fields are additive — older clients can ignore them):
+
+	{
+	  'total_queries': int,
+	  'avg_latency_ms': float,
+	  'avg_retrieval_confidence': float,
+	  'helpful_feedback': int,
+	  'unhelpful_feedback': int,
+	  'feedback_breakdown': { helpful, not_helpful },
+	  'total_documents': int,
+	  'total_users': int,
+	  'active_users_in_period': int,
+	  'period_days': int,
+	  'total_queries_in_period': int,
+	  ...
+	}
 	"""
 	# Validate 'days' query param
 	_default_days = 7
@@ -309,24 +341,213 @@ def analytics_view(request):
 
 	cutoff_date = timezone.now() - timedelta(days=days_back)
 	recent_logs = QueryLog.objects.filter(created_at__gte=cutoff_date)
+	all_logs = QueryLog.objects.all()
+
+	helpful_in_period = QueryFeedback.objects.filter(
+		created_at__gte=cutoff_date,
+		rating=QueryFeedback.Rating.THUMBS_UP,
+	).count()
+	unhelpful_in_period = QueryFeedback.objects.filter(
+		created_at__gte=cutoff_date,
+		rating=QueryFeedback.Rating.THUMBS_DOWN,
+	).count()
+
+	helpful_all = QueryFeedback.objects.filter(rating=QueryFeedback.Rating.THUMBS_UP).count()
+	unhelpful_all = QueryFeedback.objects.filter(rating=QueryFeedback.Rating.THUMBS_DOWN).count()
+
+	# `total_documents` and `total_users` are intentionally GLOBAL (not
+	# bounded by `cutoff_date`). The admin dashboard "Total Documents" card
+	# must reflect every ingested document, not just recent ones — bounding
+	# it by the analytics window would silently understate the corpus.
+	total_documents = Document.objects.count()
+	total_users = User.objects.count()
+	active_users_in_period = recent_logs.values('user').distinct().count()
+
+	def _avg_float(qs, field: str) -> float:
+		row = qs.aggregate(Avg(field))
+		val = row.get(f'{field}__avg')
+		if val is None:
+			return 0.0
+		return float(val)
 
 	stats = {
-		'total_queries': recent_logs.count(),
-		'avg_latency_ms': recent_logs.aggregate(Avg('latency_ms'))['latency_ms__avg'] or 0,
-		'avg_retrieval_confidence': recent_logs.aggregate(Avg('retrieval_confidence'))['retrieval_confidence__avg'] or 0,
-		'queries_by_model': dict(recent_logs.values('llm_model').annotate(count=Count('id')).values_list('llm_model', 'count')),
+		# Primary metrics (GLOBAL — all-time QueryLog / QueryFeedback), per admin spec:
+		'total_queries': all_logs.count(),
+		'avg_latency_ms': _avg_float(all_logs, 'latency_ms'),
+		'avg_retrieval_confidence': _avg_float(all_logs, 'retrieval_confidence'),
+		'helpful_feedback': helpful_all,
+		'unhelpful_feedback': unhelpful_all,
+
+		# Window-scoped (last `days` days) — additive for existing consumers:
+		'total_queries_in_period': recent_logs.count(),
+		'avg_latency_ms_in_period': _avg_float(recent_logs, 'latency_ms'),
+		'avg_retrieval_confidence_in_period': _avg_float(recent_logs, 'retrieval_confidence'),
+		'helpful_feedback_in_period': helpful_in_period,
+		'unhelpful_feedback_in_period': unhelpful_in_period,
+		'queries_by_model': dict(
+			recent_logs.values('llm_model').annotate(count=Count('id')).values_list('llm_model', 'count')
+		),
+		# Back-compat: nested shape still mirrors the all-time thumbs counts.
 		'feedback_breakdown': {
-			'helpful': QueryFeedback.objects.filter(
-				created_at__gte=cutoff_date,
-				rating=QueryFeedback.Rating.THUMBS_UP
-			).count(),
-			'not_helpful': QueryFeedback.objects.filter(
-				created_at__gte=cutoff_date,
-				rating=QueryFeedback.Rating.THUMBS_DOWN
-			).count(),
+			'helpful': helpful_all,
+			'not_helpful': unhelpful_all,
 		},
-		'total_users': recent_logs.values('user').distinct().count(),
 		'period_days': days_back,
+
+		# Global metrics (documents / accounts):
+		'total_documents': total_documents,
+		'total_users': total_users,
+		'active_users_in_period': active_users_in_period,
 	}
 
 	return Response(stats)
+
+
+class AdminQueryLogListView(generics.ListAPIView):
+	"""
+	GET /api/v1/ai/query-logs/
+
+	Admin-only list of every query the RAG pipeline has answered. Supports
+	`?search=` (against `query_text` and `llm_response`, case-insensitive)
+	and `?min_confidence=` / `?max_confidence=` for filtering low-confidence
+	retrievals (the admin SPA highlights `retrieval_confidence < 0.5` as
+	"low confidence"; this view lets admins drill into just those rows if
+	they want to).
+
+	Pagination is disabled so the admin SPA can derive aggregate
+	low-confidence / high-confidence counts from the array length. The
+	queryset is capped to the 500 most recent rows in ``list()`` — older
+	traffic should be narrowed with ``?min_confidence=`` / ``?search=``.
+
+	Response envelope::
+
+	    {
+	      "count": <total rows matching filters (not capped)>,
+	      "results": [ ... up to 500 rows ... ],
+	      "stats": {
+	        "total_queries": <same as count>,
+	        "avg_latency_ms": float,
+	        "avg_retrieval_confidence": float,
+	        "low_confidence_count": int,  # retrieval_confidence < 0.5 (full filtered set)
+	      }
+	    }
+	"""
+
+	serializer_class = AdminQueryLogSerializer
+	permission_classes = [permissions.IsAdminUser]
+	pagination_class = None
+	MAX_ROWS = 500
+
+	def get_queryset(self):
+		queryset = QueryLog.objects.select_related('user').order_by('-created_at')
+
+		search = self.request.query_params.get('search')
+		if search:
+			queryset = queryset.filter(
+				Q(query_text__icontains=search) | Q(llm_response__icontains=search)
+			)
+
+		min_conf = self.request.query_params.get('min_confidence')
+		max_conf = self.request.query_params.get('max_confidence')
+		try:
+			if min_conf is not None:
+				queryset = queryset.filter(retrieval_confidence__gte=float(min_conf))
+			if max_conf is not None:
+				queryset = queryset.filter(retrieval_confidence__lte=float(max_conf))
+		except (TypeError, ValueError):
+			pass
+
+		return queryset
+
+	def list(self, request, *args, **kwargs):
+		queryset = self.filter_queryset(self.get_queryset())
+		total = queryset.count()
+		avg_lat = queryset.aggregate(Avg('latency_ms'))['latency_ms__avg']
+		avg_conf = queryset.aggregate(Avg('retrieval_confidence'))['retrieval_confidence__avg']
+		low_confidence_count = queryset.filter(retrieval_confidence__lt=0.5).count()
+		stats = {
+			'total_queries': total,
+			'avg_latency_ms': float(avg_lat or 0),
+			'avg_retrieval_confidence': float(avg_conf or 0),
+			'low_confidence_count': low_confidence_count,
+		}
+		page_qs = queryset[: self.MAX_ROWS]
+		serializer = self.get_serializer(page_qs, many=True)
+		return Response(
+			{
+				'count': total,
+				'results': serializer.data,
+				'stats': stats,
+			}
+		)
+
+
+class AdminFeedbackListView(generics.ListAPIView):
+	"""
+	GET /api/v1/feedback/
+
+	Admin-only list of every feedback record on the system. Joins to the
+	parent `QueryLog` so each row carries the original query/response
+	text inline — the admin UI renders all four columns in a single
+	table.
+
+	Supports `?is_helpful=true|false` (filters by mapped rating) and
+	`?search=` (against the joined query/response text). The dedicated
+	endpoint is preferred over inferring counts from `analytics_view`
+	because the SPA needs per-row metadata (the analytics view returns
+	aggregate counts only).
+
+	Pagination is disabled (see sibling admin views for rationale) and
+	the result list is capped to the 500 most recent rows in ``list()``.
+
+	Response envelope::
+
+	    {
+	      "count": <rows matching filters (uncapped)>,
+	      "results": [ ... up to 500 ... ],
+	      "stats": { "total", "helpful", "unhelpful" }  # GLOBAL, ignores ?search=
+	    }
+	"""
+
+	serializer_class = AdminQueryFeedbackSerializer
+	permission_classes = [permissions.IsAdminUser]
+	pagination_class = None
+	MAX_ROWS = 500
+
+	def get_queryset(self):
+		queryset = QueryFeedback.objects.select_related('query_log', 'user').order_by('-created_at')
+
+		is_helpful = self.request.query_params.get('is_helpful')
+		if is_helpful is not None:
+			# Accept 'true'/'false'/'1'/'0' — robust to whatever the SPA emits.
+			truthy = str(is_helpful).strip().lower() in {'1', 'true', 'yes'}
+			rating = QueryFeedback.Rating.THUMBS_UP if truthy else QueryFeedback.Rating.THUMBS_DOWN
+			queryset = queryset.filter(rating=rating)
+
+		search = self.request.query_params.get('search')
+		if search:
+			queryset = queryset.filter(
+				Q(query_log__query_text__icontains=search)
+				| Q(query_log__llm_response__icontains=search)
+				| Q(comment__icontains=search)
+			)
+
+		return queryset
+
+	def list(self, request, *args, **kwargs):
+		queryset = self.filter_queryset(self.get_queryset())
+		base = QueryFeedback.objects.all()
+		stats = {
+			'total': base.count(),
+			'helpful': base.filter(rating=QueryFeedback.Rating.THUMBS_UP).count(),
+			'unhelpful': base.filter(rating=QueryFeedback.Rating.THUMBS_DOWN).count(),
+		}
+		page_qs = queryset[: self.MAX_ROWS]
+		serializer = self.get_serializer(page_qs, many=True)
+		return Response(
+			{
+				'count': queryset.count(),
+				'results': serializer.data,
+				'stats': stats,
+			}
+		)

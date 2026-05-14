@@ -10,7 +10,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger 
 } from '@/components/ui/dropdown-menu';
-import { User, LogOut, LayoutDashboard } from 'lucide-react';
+import { User, LogOut, LayoutDashboard, ShieldCheck } from 'lucide-react';
 
 interface HeaderProps {
   onLoginClick?: () => void;
@@ -65,12 +65,28 @@ export function Header({ onLoginClick, onRegisterClick, variant = 'landing' }: H
                 </div>
                 <DropdownMenuSeparator />
                 {isAdmin && (
-                  <DropdownMenuItem asChild>
-                    <Link to="/admin" className="cursor-pointer">
-                      <LayoutDashboard className="mr-2 h-4 w-4" />
-                      Admin Dashboard
-                    </Link>
-                  </DropdownMenuItem>
+                  <>
+                    <DropdownMenuItem asChild>
+                      <Link to="/admin" className="cursor-pointer">
+                        <LayoutDashboard className="mr-2 h-4 w-4" />
+                        Admin Dashboard
+                      </Link>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem asChild>
+                      {/* Django's canonical admin lives at /admin/ on the
+                          backend. Opening in a new tab keeps the SPA session
+                          and the Django session independent. */}
+                      <a
+                        href="/admin/"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="cursor-pointer"
+                      >
+                        <ShieldCheck className="mr-2 h-4 w-4" />
+                        Open Django Admin
+                      </a>
+                    </DropdownMenuItem>
+                  </>
                 )}
                 {isAuthenticated && (
                   <DropdownMenuItem asChild>

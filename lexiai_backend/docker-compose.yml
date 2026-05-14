@@ -8,7 +8,10 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - '5432:5432'
+      # Host port 15432 -> container 5432. On Windows, Hyper-V/WSL2 reserves
+      # the 4938-5740 TCP range, so binding host 5432/5433 fails.
+      # Other services still connect to `db:5432` over the docker network.
+      - '${POSTGRES_HOST_PORT:-15432}:5432'
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-lexiai_db}"]
       interval: 2s
@@ -39,7 +42,9 @@ services:
     volumes:
       - ..:/app
     ports:
-      - '8000:8000'
+      # Host port → container 8000. Windows often blocks 0.0.0.0:8000 (Hyper-V
+      # excluded ranges). Override with WEB_HOST_PORT in .env (e.g. 8000 on macOS).
+      - '${WEB_HOST_PORT:-18000}:8000'
     depends_on:
       db:
         condition: service_healthy

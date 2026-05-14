@@ -9,7 +9,8 @@ import {
   MessageSquare, 
   Activity,
   LogOut,
-  ChevronLeft
+  ChevronLeft,
+  ShieldCheck
 } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 
@@ -51,6 +52,21 @@ export function AdminSidebar() {
       </nav>
 
       <div className="p-4 border-t border-sidebar-border space-y-2">
+        {/* Canonical model-CRUD admin (Django's built-in). Opens in a new
+            tab so the SPA session is unaffected. Auth there is Django
+            session-based, NOT JWT — staff users sign in with the same
+            credentials they use here. */}
+        <a
+          href="/admin/"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="block"
+        >
+          <Button variant="sidebar" className="w-full">
+            <ShieldCheck className="h-4 w-4 mr-3" />
+            Open Django Admin
+          </Button>
+        </a>
         <NavLink to="/chat">
           <Button variant="sidebar" className="w-full">
             <ChevronLeft className="h-4 w-4 mr-3" />

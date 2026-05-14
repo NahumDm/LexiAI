@@ -10,13 +10,17 @@ export default function AdminLayout() {
     return <div className="flex items-center justify-center p-8">Loading...</div>;
   }
 
-  // Redirect non-admin users
+  // Anyone hitting /admin/* without a session goes through the dedicated
+  // admin login (NOT the user `/login`). This keeps the admin flow
+  // self-contained — a non-staff user who lands here is invited to switch
+  // accounts on the admin page rather than being silently redirected into
+  // the user app.
   if (!user) {
-    return <Navigate to="/login" replace />;
+    return <Navigate to="/admin-login" replace />;
   }
 
   if (!isAdmin) {
-    return <Navigate to="/chat" replace />;
+    return <Navigate to="/admin-login" replace />;
   }
 
   return (

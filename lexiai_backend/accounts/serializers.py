@@ -33,6 +33,8 @@ class AccountProfileSerializer(serializers.ModelSerializer):
             'last_name',
             'is_verified',
             'is_premium',
+            'is_staff',
+            'is_superuser',
             'role',
             'full_name',
             'phone_number',
@@ -41,7 +43,15 @@ class AccountProfileSerializer(serializers.ModelSerializer):
             'created_at',
             'updated_at',
         )
-        read_only_fields = ('id', 'email', 'is_verified', 'is_premium', 'role', 'created_at', 'updated_at')
+        # `is_staff` / `is_superuser` are surfaced read-only so the SPA can gate
+        # admin routes off Django's canonical admin flags (NOT a custom role
+        # string). These are write-protected here — flipping them happens in
+        # Django's built-in admin or via `manage.py createsuperuser`.
+        read_only_fields = (
+            'id', 'email', 'is_verified', 'is_premium',
+            'is_staff', 'is_superuser', 'role',
+            'created_at', 'updated_at',
+        )
 
     def update(self, instance, validated_data):
         profile_data = validated_data.pop('profile', {})
@@ -121,3 +131,84 @@ class EmailTokenObtainPairSerializer(TokenObtainPairSerializer):
         token['is_verified'] = user.is_verified
         token['is_premium'] = user.is_premium
         return token
+
+
+class AdminUserSerializer(serializers.ModelSerializer):
+    """
+    Read-only admin view of every account on the system.
+
+    Exposes the minimal set the admin SPA needs to render its user table:
+    identity (id/email/username), display name parts, and the canonical
+    Django auth flags (`is_staff`, `is_superuser`, `is_active`). `last_login`
+    is mirrored from `AbstractBaseUser` for "last active" UI; `date_joined`
+    mirrors what `auth.User` exposes and is what `/accounts/users/` consumers
+    expect per the admin-API spec.
+    """
+
+    role = RoleSerializer(read_only=True)
+
+    class Meta:
+        model = User
+        fields = (
+            'id',
+            'email',
+            'username',
+            'first_name',
+            'last_name',
+            'role',
+            'is_active',
+            'is_staff',
+            'is_superuser',
+            'is_verified',
+            'is_premium',
+            'date_joined',
+            'last_login',
+            'created_at',
+        )
+        read_only_fields = fields
+
+
+class AdminUserUpdateSerializer(serializers.ModelSerializer):
+    """
+    Writable subset for PATCH /api/v1/accounts/users/<id>/ (IsAdminUser only).
+    Response shape is normalized via ``AdminUserSerializer`` in ``to_representation``.
+    """
+
+    class Meta:
+        model = User
+        fields = ('is_active', 'is_staff', 'is_superuser')
+
+    def validate(self, attrs):
+        request = self.context.get('request')
+        instance = self.instance
+        if request is None or not getattr(request.user, 'is_authenticated', False) or instance is None:
+            return attrs
+
+        if instance.pk == request.user.pk:
+            if attrs.get('is_active') is False:
+                raise serializers.ValidationError(
+                    {'is_active': 'You cannot deactivate your own account via the API.'}
+                )
+            if 'is_staff' in attrs and attrs['is_staff'] != instance.is_staff:
+                raise serializers.ValidationError(
+                    {'is_staff': 'You cannot change your own staff flag via the API.'}
+                )
+            if 'is_superuser' in attrs and attrs['is_superuser'] != instance.is_superuser:
+                raise serializers.ValidationError(
+                    {'is_superuser': 'You cannot change your own superuser flag via the API.'}
+                )
+
+        if 'is_superuser' in attrs and not request.user.is_superuser:
+            raise serializers.ValidationError(
+                {'is_superuser': 'Only superusers may change superuser privileges.'}
+            )
+
+        return attrs
+
+    def update(self, instance, validated_data):
+        if validated_data.get('is_superuser') is True:
+            validated_data['is_staff'] = True
+        return super().update(instance, validated_data)
+
+    def to_representation(self, instance):
+        return AdminUserSerializer(instance, context=self.context).data

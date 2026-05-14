@@ -1,8 +1,8 @@
 # LexiAI
 
-A production-grade **Retrieval-Augmented Generation (RAG)** backend for legal and tax documents. LexiAI ingests user-uploaded documents, chunks and embeds them with sentence-transformers, and answers natural-language questions by retrieving the most relevant passages and grounding a Mistral LLM completion on them — with strict citation rules, observability, and graceful degradation.
+A production-grade **Retrieval-Augmented Generation (RAG)** stack for legal and tax documents. The **Django + DRF** service ingests user-uploaded documents, chunks and embeds them with sentence-transformers, and answers natural-language questions by retrieving the most relevant passages and grounding a Mistral LLM completion on them — with strict citation rules, observability, and graceful degradation.
 
-This repository is the Django service that powers the system: ingestion, embeddings, retrieval, QA orchestration, LLM integration, and a versioned REST API.
+This repository contains that **Django API** plus an optional **React (Vite) frontend** with a **staff-only admin dashboard** (`/admin` in the SPA) that talks to the same versioned REST API over JWT. Django’s built-in `/admin/` site remains available for model CRUD; the SPA is a separate convenience UI for operators.
 
 ---
 
@@ -16,6 +16,26 @@ This repository is the Django service that powers the system: ingestion, embeddi
 - **Per-user request observability** — every `/ask/` call logs `user_id`, query size, `top_k`, retrieval confidence, LLM latency, token usage, and a 60-second rolling request counter.
 - **Hardened configuration** — env-driven settings, weak-`SECRET_KEY` detection in production, no hardcoded credentials, sensitive files gitignored.
 - **Reproducible deployment** — all runtime dependencies are pinned and installed at Docker build time; no runtime `pip install`.
+- **Staff admin API + SPA** — JWT-authenticated React routes under `/admin` backed by DRF views with `IsAdminUser`: global analytics, documents (list/search/reprocess/delete), users (list + partial update), feedback, and query logs. See *Admin SPA & staff APIs* below.
+
+---
+
+## Admin SPA & staff APIs
+
+The SPA admin area is **UI gating only** (`is_staff` / `is_superuser` on the JWT user object). Every sensitive operation is enforced again in DRF with **`permissions.IsAdminUser`**.
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| `GET` | `/api/v1/ai/analytics/?days=N` | System-wide analytics (documents, users, query aggregates, feedback). |
+| `GET` | `/api/v1/documents/admin/` | Global document list; optional `?search=` (title); response includes `stats` for dashboard cards. |
+| `DELETE` | `/api/v1/documents/admin/<id>/` | Admin delete of any document (not owner-scoped). |
+| `POST` | `/api/v1/documents/<id>/ingest/` | Re-queue chunking + embedding for an existing document (`embed_document_chunks` Celery task). Requires non-empty `extracted_text`. Returns `job_id` (Celery async result id). |
+| `GET` | `/api/v1/accounts/users/` | Global user list; optional `?search=`; envelope with `stats`. |
+| `GET`, `PATCH` | `/api/v1/accounts/users/<id>/` | Read or partially update `is_active`, `is_staff`, `is_superuser` (only superusers may change `is_superuser`; self-deactivation and edits to your own staff or superuser flags are blocked). |
+| `GET` | `/api/v1/feedback/` | Global feedback rows + `stats`. |
+| `GET` | `/api/v1/ai/query-logs/` | Global query logs + `stats` (recent rows capped; see `AdminQueryLogListView`). |
+
+**Local dev with Vite:** the browser calls same-origin `/api/…` and Vite proxies to Django. Docker Compose maps the web container to **`WEB_HOST_PORT`** on the host (default **18000**, to avoid Windows Hyper-V exclusions on port `8000`). Align the proxy by setting `VITE_DJANGO_PROXY_PORT` in `frontend/.env` when it differs from the default (see `lexiai_backend/.env.example`).
 
 ---
 
@@ -202,6 +222,7 @@ Liveness + LLM/RAG/DB configuration probe. **Unauthenticated** so uptime monitor
 | Layer        | Choice                                    | Rationale                                                                 |
 | ------------ | ----------------------------------------- | ------------------------------------------------------------------------- |
 | Web          | Django 6 + DRF + Gunicorn                 | Batteries-included, mature ORM, robust auth ecosystem.                    |
+| Frontend     | React 18 + Vite + TypeScript              | Optional SPA: public site, JWT auth, staff admin at `/admin`.             |
 | Auth         | SimpleJWT                                 | Stateless tokens, refresh flow, frontend-friendly.                        |
 | Database     | PostgreSQL 17                             | JSON support, future pgvector migration path, transactional ingestion.    |
 | Cache/Broker | Redis 7                                   | Shared cache for rate counters, Celery broker, result backend.            |
@@ -223,6 +244,7 @@ All configuration is environment-driven. See [`lexiai_backend/.env.example`](lex
 | `ALLOWED_HOSTS`           | yes\*    | `localhost,127.0.0.1,web` (dev)            | Required when `DEBUG=False`.                                       |
 | `LOG_LEVEL`               | no       | `INFO`                                     | `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL`.               |
 | `DATABASE_URL`            | yes      | —                                          | `postgres://user:pass@host:5432/db`                                |
+| `WEB_HOST_PORT`           | no       | `18000` (see template)                     | **Docker Compose only:** TCP port on the host mapped to Gunicorn’s `8000` inside the `web` container. Match `VITE_DJANGO_PROXY_PORT` in `frontend/.env` when running the Vite dev server. |
 | `REDIS_URL`               | yes      | `redis://redis:6379/0`                     | Shared broker + cache.                                             |
 | `CELERY_BROKER_URL`       | no       | mirrors `REDIS_URL`                        |                                                                    |
 | `CELERY_RESULT_BACKEND`   | no       | mirrors `REDIS_URL`                        |                                                                    |
@@ -283,12 +305,24 @@ docker compose logs -f web
 # Re-run after .env changes (env is read at process start)
 docker compose up -d --force-recreate web
 
-# Health check
-curl http://localhost:8000/api/v1/health/
+# Health check (use the host port from WEB_HOST_PORT; Compose default is 18000)
+curl http://localhost:18000/api/v1/health/
 
-# Run tests
+# Run tests (pytest + Django; settings from lexiai_backend/pytest.ini)
 docker compose exec web pytest
 ```
+
+### Optional: React (Vite) SPA
+
+The `frontend/` app serves the marketing site, authenticated user flows, and the **staff operator UI** at `/admin` (JWT). From the repo root:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Vite defaults to `http://localhost:5173`. API calls use same-origin `/api/…` and are proxied to Django; set `VITE_DJANGO_PROXY_PORT` in `frontend/.env` so it matches wherever Gunicorn is reachable on the host (typically **`18000`** with the Compose defaults above, or **`8000`** if you run `manage.py runserver` locally without Docker).
 
 ---
 

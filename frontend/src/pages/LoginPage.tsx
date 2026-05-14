@@ -20,35 +20,43 @@ export default function LoginPage() {
   const location = useLocation();
   const { isAuthenticated, login } = useAuth();
 
-  // Redirect to chat if already logged in
+  // If the user is ALREADY authenticated (e.g. they hit /login with a live
+  // session), bounce them to the originally-intended page. We deliberately do
+  // NOT use this effect as the post-login redirect mechanism — handleLogin in
+  // AuthContext owns the post-login navigate(/chat) to avoid double-nav.
   useEffect(() => {
     if (isAuthenticated) {
-      const fromState = location.state?.from;
-      const from = typeof fromState === 'string' ? fromState : fromState?.pathname || '/chat';
+      const fromState = (location.state as { from?: string | { pathname?: string } } | null)?.from;
+      const from =
+        typeof fromState === 'string'
+          ? fromState
+          : fromState?.pathname || '/chat';
       navigate(from, { replace: true });
     }
-  }, [isAuthenticated, navigate, location]);
+  }, [isAuthenticated, navigate, location.state]);
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsLoading(true);
+    setIsSubmitting(true);
     setError('');
 
     try {
       await login(email, password);
-      // Redirect happens via useEffect watching isAuthenticated
+      // handleLogin in AuthContext navigates to /chat on success.
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Invalid email or password');
     } finally {
-      setIsLoading(false);
+      setIsSubmitting(false);
     }
   };
+
+  const isLoading = isSubmitting;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-background to-muted flex items-center justify-center p-4">
@@ -138,11 +146,20 @@ export default function LoginPage() {
             </Button>
           </form>
 
-          {/* Demo Info */}
+          {/* No demo credentials are shown here. Admins log in via
+              Django's built-in admin at /admin/, not through this form. */}
           <div className="mt-6 pt-6 border-t border-border text-center text-xs text-muted-foreground space-y-1">
-            <p>Demo credentials:</p>
-            <p>Email: <code className="bg-muted px-1 rounded">admin@lexitax.ai</code></p>
-            <p>Password: any 4+ characters</p>
+            <p>
+              No account?{' '}
+              <button
+                type="button"
+                className="underline underline-offset-2 hover:text-foreground"
+                onClick={() => navigate('/register')}
+              >
+                Create one
+              </button>
+              .
+            </p>
           </div>
         </div>
 

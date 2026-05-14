@@ -16,6 +16,14 @@ export interface User {
   is_active?: boolean;
   is_verified?: boolean;
   is_premium?: boolean;
+  // Canonical Django admin flags. Mirrored from
+  // `accounts.AccountProfileSerializer`. Used by `AuthContext.isAdmin` and
+  // `ProtectedRoute(requireAdmin)`. NEVER trust these alone for backend
+  // authorization — they are echoed from the JWT user payload purely for UI
+  // gating; the backend still enforces `IsAdminUser` / `is_staff` on every
+  // protected endpoint.
+  is_staff?: boolean;
+  is_superuser?: boolean;
   created_at: string;
 }
 
@@ -58,6 +66,8 @@ type BackendUser = {
   is_active?: boolean;
   is_verified?: boolean;
   is_premium?: boolean;
+  is_staff?: boolean;
+  is_superuser?: boolean;
   created_at: string;
 };
 
@@ -90,12 +100,30 @@ export const normalizeUser = (raw: BackendUser): User => ({
   is_active: raw.is_active,
   is_verified: raw.is_verified,
   is_premium: raw.is_premium,
+  is_staff: raw.is_staff,
+  is_superuser: raw.is_superuser,
   created_at: raw.created_at,
 });
 
+const isSuccessfulAuth = (response: ApiResponse<LoginResponse>): boolean => {
+  const data = response.data;
+  return (
+    response.status >= 200 &&
+    response.status < 300 &&
+    !!data &&
+    typeof data.access === 'string' &&
+    data.access.length > 0
+  );
+};
+
 export class AuthAPI {
   /**
-   * Login user and store tokens
+   * Authenticate by email + password.
+   *
+   * On 401 / 400 the apiClient bubbles the error in `response.error` WITHOUT
+   * triggering the global unauthorized handler (auth endpoints are exempt by
+   * design — see client.ts AUTH_ENDPOINT_PATTERNS). We rely on that here so
+   * "wrong password" surfaces as a normal form error, not a forced logout.
    */
   static async login(credentials: LoginRequest): Promise<ApiResponse<LoginResponse>> {
     const response = await apiClient.post<LoginResponse>('/auth/login/', {
@@ -103,9 +131,21 @@ export class AuthAPI {
       password: credentials.password,
     });
 
-    if (response.data?.access) {
-      apiClient.setAuthTokens(response.data.access, response.data.refresh);
+    if (!isSuccessfulAuth(response)) {
+      // Strip stale tokens just in case a prior login left them; do NOT call
+      // setAuthTokens with undefined access.
+      return {
+        status: response.status,
+        error:
+          response.error ||
+          (response.status === 401
+            ? 'Invalid email or password.'
+            : 'Login failed. Please try again.'),
+        data: response.data,
+      };
     }
+
+    apiClient.setAuthTokens(response.data!.access, response.data!.refresh);
 
     if (response.data?.user) {
       response.data.user = normalizeUser(response.data.user as unknown as BackendUser);
@@ -115,14 +155,20 @@ export class AuthAPI {
   }
 
   /**
-   * Start an ephemeral guest session (JWT + server-side user). Frontend still tracks guest quota.
+   * Start an ephemeral authenticated guest session (real JWT, ephemeral user).
    */
   static async guestSession(): Promise<ApiResponse<LoginResponse>> {
     const response = await apiClient.post<LoginResponse>('/auth/guest-session/', {});
 
-    if (response.data?.access) {
-      apiClient.setAuthTokens(response.data.access, response.data.refresh);
+    if (!isSuccessfulAuth(response)) {
+      return {
+        status: response.status,
+        error: response.error || 'Could not start guest session.',
+        data: response.data,
+      };
     }
+
+    apiClient.setAuthTokens(response.data!.access, response.data!.refresh);
 
     if (response.data?.user) {
       response.data.user = normalizeUser(response.data.user as unknown as BackendUser);
@@ -194,14 +240,20 @@ export class AuthAPI {
   }
 
   /**
-   * Logout user
+   * Logout: blacklist refresh token on backend, then clear local creds.
+   *
+   * Backend's `TokenBlacklistView` REQUIRES the refresh token in the body,
+   * otherwise it 400s. Previously we sent `{}` which silently failed and left
+   * the refresh token usable for `ACCESS_TOKEN_LIFETIME` more minutes.
    */
   static async logout(): Promise<void> {
-    // Optional: notify backend of logout
-    try {
-      await apiClient.post('/auth/logout/', {});
-    } catch (error) {
-      console.warn('Logout notification failed (non-critical):', error);
+    const refresh = apiClient.getRefreshToken();
+    if (refresh) {
+      try {
+        await apiClient.post('/auth/logout/', { refresh });
+      } catch (error) {
+        console.warn('Logout notification failed (non-critical):', error);
+      }
     }
 
     apiClient.logout();

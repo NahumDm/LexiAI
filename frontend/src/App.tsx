@@ -11,6 +11,7 @@ import RegisterPage from "./pages/RegisterPage";
 import ChatPage from "./pages/ChatPage";
 import AccountPage from "./pages/AccountPage";
 import AdminLayout from "./pages/admin/AdminLayout";
+import AdminLoginPage from "./pages/admin/AdminLoginPage";
 import AdminDashboard from "./pages/admin/AdminDashboard";
 import DocumentsPage from "./pages/admin/DocumentsPage";
 import UsersPage from "./pages/admin/UsersPage";
@@ -20,6 +21,10 @@ import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
 
+// The /admin/* routes below are the SPA admin DASHBOARD UI (built earlier).
+// They are gated by `AdminLayout` which redirects non-staff users. The
+// canonical model-CRUD admin still lives at Django's /admin/ — see
+// AdminSidebar for the "Open Django Admin" link.
 const App = () => (
   <QueryClientProvider client={queryClient}>
     <BrowserRouter>
@@ -34,6 +39,11 @@ const App = () => (
               <Route path="/register" element={<RegisterPage />} />
               <Route path="/chat" element={<ChatPage />} />
               <Route path="/account" element={<AccountPage />} />
+              {/* Separate, isolated entry point for the SPA admin console.
+                  The regular /login route is intentionally untouched — users
+                  there still land on /chat. Only staff/superusers passing the
+                  AdminLoginPage gate proceed to /admin/*. */}
+              <Route path="/admin-login" element={<AdminLoginPage />} />
               <Route path="/admin" element={<AdminLayout />}>
                 <Route index element={<AdminDashboard />} />
                 <Route path="documents" element={<DocumentsPage />} />

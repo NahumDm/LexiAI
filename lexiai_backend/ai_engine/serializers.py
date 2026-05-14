@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
-from ai_engine.models import QueryFeedback
+from ai_engine.models import QueryFeedback, QueryLog
 
 
 class ChatQuerySerializer(serializers.Serializer):
@@ -71,3 +71,70 @@ class QueryFeedbackSerializer(serializers.ModelSerializer):
 			raise serializers.ValidationError('Authenticated user required to submit feedback')
 		validated_data['user'] = user
 		return super().create(validated_data)
+
+
+class AdminQueryLogSerializer(serializers.ModelSerializer):
+	"""
+	Read-only serializer for the admin Query Logs page.
+
+	Maps the QueryLog model to the field names the admin SPA expects:
+	`query` (←query_text) and `response` (←llm_response). Both `source`
+	naming and the original column names are preserved for backwards
+	compatibility with any internal tooling that already consumes
+	QueryLog rows directly.
+	"""
+
+	query = serializers.CharField(source='query_text', read_only=True)
+	response = serializers.CharField(source='llm_response', read_only=True)
+	user_email = serializers.EmailField(source='user.email', read_only=True)
+
+	class Meta:
+		model = QueryLog
+		fields = (
+			'id',
+			'user',
+			'user_email',
+			'query',
+			'response',
+			'llm_model',
+			'retrieval_confidence',
+			'latency_ms',
+			'created_at',
+		)
+		read_only_fields = fields
+
+
+class AdminQueryFeedbackSerializer(serializers.ModelSerializer):
+	"""
+	Read-only serializer for the admin Feedback page.
+
+	Renames the storage-level `rating` enum into the boolean `is_helpful`
+	the admin SPA renders (thumbs-up = helpful = True; thumbs-down =
+	False). Joins to the associated QueryLog to surface `query` and
+	`response` text inline so the admin page doesn't need a second
+	round-trip per row.
+	"""
+
+	is_helpful = serializers.SerializerMethodField()
+	query = serializers.CharField(source='query_log.query_text', read_only=True)
+	response = serializers.CharField(source='query_log.llm_response', read_only=True)
+	user_email = serializers.EmailField(source='user.email', read_only=True)
+
+	class Meta:
+		model = QueryFeedback
+		fields = (
+			'id',
+			'query_log',
+			'user',
+			'user_email',
+			'query',
+			'response',
+			'is_helpful',
+			'rating',
+			'comment',
+			'created_at',
+		)
+		read_only_fields = fields
+
+	def get_is_helpful(self, obj) -> bool:
+		return obj.rating == QueryFeedback.Rating.THUMBS_UP

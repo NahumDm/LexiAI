@@ -127,10 +127,6 @@ export function LoginModal({ open, onOpenChange, onSwitchToRegister }: LoginModa
             Register now
           </Button>
         </div>
-
-        <div className="text-center text-xs text-muted-foreground mt-2">
-          <p>Demo: admin@lexitax.ai or user@example.com (any 4+ char password)</p>
-        </div>
       </DialogContent>
     </Dialog>
   );

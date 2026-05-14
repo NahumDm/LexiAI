@@ -8,9 +8,9 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from pathlib import Path
 
 from django.core.management.base import CommandError
-from django.test import TestCase, override_settings
+from django.test import TestCase, TransactionTestCase, override_settings
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APIClient, APITestCase
 
 from .models import Document, DocumentIngestionJob
 from .services import resolve_ingestion_source
@@ -115,8 +115,13 @@ class DocumentIngestCommandTests(APITestCase):
 
 
 @override_settings(CELERY_TASK_ALWAYS_EAGER=True, CELERY_TASK_EAGER_PROPAGATES=True)
-class DocumentIngestionJobApiTests(APITestCase):
+class DocumentIngestionJobApiTests(TransactionTestCase):
+	# TransactionTestCase (not APITestCase): ingestion queues work via
+	# transaction.on_commit(), which does not run while the test is inside
+	# the non-committing atomic block that TestCase/APITestCase uses.
+
 	def setUp(self):
+		self.client = APIClient()
 		self.admin_user = User.objects.create_user(
 			email='admin@example.com',
 			password='password123',
@@ -169,3 +174,56 @@ class DocumentIngestionJobApiTests(APITestCase):
 			format='json',
 		)
 		self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class AdminDocumentReprocessApiTests(APITestCase):
+	def setUp(self):
+		self.admin = User.objects.create_user(
+			email='reprocess-admin@example.com',
+			password='password123',
+			is_staff=True,
+			is_superuser=True,
+		)
+		self.owner = User.objects.create_user(email='reprocess-owner@example.com', password='password123')
+		self.regular = User.objects.create_user(email='reprocess-regular@example.com', password='password123')
+		self.doc = Document.objects.create(
+			owner=self.owner,
+			title='Reprocess me',
+			extracted_text='Some long enough text for chunking. ' * 10,
+			status=Document.Status.READY,
+		)
+
+	def test_non_admin_cannot_trigger_document_reprocess(self):
+		self.client.force_authenticate(user=self.regular)
+		response = self.client.post(f'/api/v1/documents/{self.doc.pk}/ingest/', {}, format='json')
+		self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+	def test_reprocess_404_when_document_missing(self):
+		self.client.force_authenticate(user=self.admin)
+		response = self.client.post('/api/v1/documents/999999/ingest/', {}, format='json')
+		self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+	def test_reprocess_400_without_extracted_text(self):
+		empty_doc = Document.objects.create(
+			owner=self.owner,
+			title='Empty',
+			extracted_text='',
+			status=Document.Status.UPLOADED,
+		)
+		self.client.force_authenticate(user=self.admin)
+		response = self.client.post(f'/api/v1/documents/{empty_doc.pk}/ingest/', {}, format='json')
+		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+	def test_admin_triggers_reprocess_queues_task(self):
+		from unittest.mock import MagicMock, patch
+
+		self.client.force_authenticate(user=self.admin)
+		with patch('ai_engine.tasks.embed_document_chunks.delay') as mock_delay:
+			mock_delay.return_value = MagicMock(id='test-celery-task-id')
+			response = self.client.post(f'/api/v1/documents/{self.doc.pk}/ingest/', {}, format='json')
+			self.assertEqual(response.status_code, status.HTTP_200_OK)
+			self.assertEqual(response.data['message'], 'Reprocessing started')
+			self.assertEqual(response.data['document_id'], self.doc.pk)
+			self.assertEqual(response.data['job_id'], 'test-celery-task-id')
+			self.assertEqual(response.data['status'], 'queued')
+			mock_delay.assert_called_once_with(self.doc.pk)

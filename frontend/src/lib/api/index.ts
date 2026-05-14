@@ -12,4 +12,11 @@ export {
   type ConversationMessage,
   type QueryFeedback,
 } from './chat';
-export { AdminAPI, type Document, type AnalyticsStats, type QueryLog } from './admin';
+export {
+  AdminAPI,
+  type Document,
+  type AnalyticsStats,
+  type QueryLog,
+  type AdminUser,
+  type FeedbackEntry,
+} from './admin';

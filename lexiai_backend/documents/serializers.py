@@ -7,6 +7,25 @@ from .models import Document, DocumentIngestionJob
 from .services import resolve_ingestion_owner, resolve_ingestion_source
 
 
+def _admin_pipeline_status(obj: Document) -> str:
+    """
+    Canonical admin vocabulary for the SPA: ready | processing | pending |
+    failed | archived. Mirrors row-level logic shared with admin list stats.
+    """
+    meta = obj.metadata or {}
+    if meta.get('embedding_failed') or meta.get('ingestion_failed') or meta.get('failed'):
+        return 'failed'
+    if obj.status == Document.Status.UPLOADED:
+        return 'pending'
+    if obj.status == Document.Status.PROCESSING:
+        return 'processing'
+    if obj.status == Document.Status.READY:
+        return 'ready'
+    if obj.status == Document.Status.ARCHIVED:
+        return 'archived'
+    return str(obj.status)
+
+
 class DocumentSerializer(serializers.ModelSerializer):
     source_file_url = serializers.SerializerMethodField()
 
@@ -39,6 +58,18 @@ class DocumentSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         request = self.context['request']
         return Document.objects.create(owner=request.user, **validated_data)
+
+
+class AdminDocumentSerializer(DocumentSerializer):
+    """
+    Same shape as DocumentSerializer but remaps `status` to admin pipeline
+    labels (uploaded → pending, plus failed when metadata flags an error).
+    """
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data['status'] = _admin_pipeline_status(instance)
+        return data
 
 
 class DocumentIngestionJobSerializer(serializers.ModelSerializer):

@@ -11,20 +11,31 @@ import { useAuth } from '@/contexts/AuthContext';
 
 export default function LandingPage() {
   const navigate = useNavigate();
-  const { continueAsGuest, user } = useAuth();
+  const { continueAsGuest, isAuthenticated, isAdminUser } = useAuth();
   const [showLogin, setShowLogin] = useState(false);
   const [showRegister, setShowRegister] = useState(false);
 
-  // If user is already logged in, redirect to appropriate page
+  // SESSION ISOLATION
+  // ----------------------------------------------------------------
+  // Auto-routing logic for visitors who already have a session.
+  //
+  //   - Admins on `/` MUST NOT be silently bounced to `/admin`.
+  //     Doing so was the original auth-leakage bug — a localStorage
+  //     JWT from `/admin-login` would auto-authenticate the admin
+  //     into the user app the moment they typed `/`. The dedicated
+  //     guard inside `AuthContext` now tears down the admin session
+  //     and redirects to `/login` whenever an admin lands on a
+  //     user route (`/`, `/chat`, `/account`). We INTENTIONALLY do
+  //     nothing for admins here so the centralised guard owns the
+  //     teardown path and there is no race between two `navigate()`
+  //     calls.
+  //   - Non-admin authenticated users go straight to `/chat`, their
+  //     post-login destination.
   React.useEffect(() => {
-    if (user) {
-      if (user.role === 'admin') {
-        navigate('/admin');
-      } else {
-        navigate('/chat');
-      }
-    }
-  }, [user, navigate]);
+    if (!isAuthenticated) return;
+    if (isAdminUser) return;
+    navigate('/chat', { replace: true });
+  }, [isAuthenticated, isAdminUser, navigate]);
 
   const handleGuestClick = async () => {
     try {
