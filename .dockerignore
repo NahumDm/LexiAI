@@ -1,0 +1,33 @@
+# Used when build context is the monorepo root (LexiAI/). Docker only reads
+# .dockerignore from the context root — not lexiai_backend/.dockerignore.
+
+.git
+.cursor
+.idea
+.vscode
+
+# Frontend — not part of the backend image (COPY lexiai_backend/ omits it anyway;
+# these patterns help if the Dockerfile ever uses a broader COPY again).
+frontend/node_modules
+frontend/dist
+**/node_modules
+
+**/__pycache__
+**/*.py[cod]
+**/*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.venv
+venv
+env
+
+.env
+.env.*
+
+**/*.sqlite3
+**/staticfiles
+**/media
+
+.DS_Store
+Thumbs.db
