@@ -106,6 +106,14 @@ def _finalize_redis_url(raw: str) -> tuple[str, str]:
         s = f'redis://{s.lstrip("/")}'
     parsed = urlparse(s)
     if parsed.scheme in {'redis', 'rediss'}:
+        user = (parsed.username or '').lower()
+        if user.endswith('_ro') or user == 'readonly':
+            raise RuntimeError(
+                'REDIS_URL uses a read-only Redis user '
+                f'({parsed.username!r}). Cache, Celery, and rate throttling need SET/INCR. '
+                'In Upstash → your database → Connect, copy the read/write TCP URL '
+                '(username is usually "default", not "default_ro").'
+            )
         return s, parsed.scheme
     raise RuntimeError(
         'REDIS_URL must start with redis:// or rediss:// (TLS). '
@@ -133,10 +141,11 @@ redis_url, _redis_scheme = _finalize_redis_url(redis_url)
 # `base` read REDIS_URL before normalization; align cache + Celery with the canonical URL.
 REDIS_URL = redis_url
 
-_redis_cache_options: dict = {}
+# TLS for rediss:// (Upstash). Passed to redis-py via Django RedisCache OPTIONS.
+_redis_ssl_options: dict | None = None
 if _redis_scheme == 'rediss':
-    # Upstash / managed Redis often need relaxed cert verification via redis-py.
-    _redis_cache_options['ssl_cert_reqs'] = ssl.CERT_NONE
+    # redis-py ConnectionPool.from_url() — OPTIONS are passed through by Django RedisCache.
+    _redis_ssl_options = {'ssl_cert_reqs': ssl.CERT_NONE}
 
 if env_bool('CACHE_USE_LOCUMEM', False):
     CACHES['default'] = {
@@ -148,13 +157,24 @@ else:
         'BACKEND': 'django.core.cache.backends.redis.RedisCache',
         'LOCATION': REDIS_URL,
     }
-    if _redis_cache_options:
-        _cache_cfg['OPTIONS'] = _redis_cache_options
+    if _redis_ssl_options:
+        _cache_cfg['OPTIONS'] = _redis_ssl_options
     CACHES['default'] = _cache_cfg
+
 _celery_broker = _env_stripped('CELERY_BROKER_URL')
 _celery_result = _env_stripped('CELERY_RESULT_BACKEND')
 CELERY_BROKER_URL = _celery_broker or REDIS_URL
 CELERY_RESULT_BACKEND = _celery_result or CELERY_BROKER_URL
+
+# Celery/kombu do not always infer TLS from rediss:// alone — set explicitly for Upstash.
+if _redis_scheme == 'rediss':
+    CELERY_BROKER_USE_SSL = {
+        'ssl_cert_reqs': ssl.CERT_NONE,
+    }
+
+    CELERY_REDIS_BACKEND_USE_SSL = {
+        'ssl_cert_reqs': ssl.CERT_NONE,
+    }
 
 # Default `*` when unset so deploy works before the public hostname / frontend URL is known.
 # Set explicit comma-separated hosts in Railway Variables before exposing real traffic.

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Same as start.sh — loads prod.py (CELERY_*_USE_SSL, REDIS_URL, cache, etc.).
 export DJANGO_SETTINGS_MODULE=lexiai_backend.settings.prod
 
 if [ -z "${SECRET_KEY:-}" ]; then
@@ -20,6 +21,7 @@ if [ -z "${CORS_ALLOWED_ORIGINS:-}" ]; then
   exit 1
 fi
 
-celery -A lexiai_backend worker \
+exec celery -A lexiai_backend worker \
   --loglevel=info \
   --concurrency=2
+
