@@ -68,16 +68,20 @@ if _redis_scheme not in {'redis', 'rediss'}:
 _allowed = env_list('ALLOWED_HOSTS', ['*'])
 ALLOWED_HOSTS = _allowed if _allowed else ['*']
 
-if not CORS_ALLOWED_ORIGINS:
+# Do not rely on base.py localhost default in production: require explicit browser origins.
+_cors_env = _env_stripped('CORS_ALLOWED_ORIGINS')
+if not _cors_env:
     raise RuntimeError(
         'CORS_ALLOWED_ORIGINS is missing or empty. Set comma-separated HTTPS origins for your '
         'frontend (e.g. https://your-app.vercel.app). Browsers will block API calls without this.'
     )
-if not CSRF_TRUSTED_ORIGINS:
-    raise RuntimeError(
-        'CSRF_TRUSTED_ORIGINS is missing or empty. For SPAs on a separate origin, set this to the '
-        'same browser-visible URLs as CORS_ALLOWED_ORIGINS (comma-separated, include https://).'
-    )
+CORS_ALLOWED_ORIGINS = [p.strip() for p in _cors_env.split(',') if p.strip()]
+
+_csrf_env = _env_stripped('CSRF_TRUSTED_ORIGINS')
+if _csrf_env:
+    CSRF_TRUSTED_ORIGINS = [p.strip() for p in _csrf_env.split(',') if p.strip()]
+else:
+    CSRF_TRUSTED_ORIGINS = list(CORS_ALLOWED_ORIGINS)
 
 _db_ssl_require = env_bool('DB_SSL_REQUIRE', True)
 try:

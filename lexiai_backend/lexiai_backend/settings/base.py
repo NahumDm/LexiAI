@@ -147,9 +147,10 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # As early as possible so preflight / CORS headers apply before other middleware.
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -238,8 +239,14 @@ SIMPLE_JWT = {
 }
 
 CORS_ALLOW_CREDENTIALS = True
-CORS_ALLOWED_ORIGINS = env_list('CORS_ALLOWED_ORIGINS', [])
-CSRF_TRUSTED_ORIGINS = env_list('CSRF_TRUSTED_ORIGINS', [])
+# Default matches Vite; override with comma-separated origins (e.g. https://*.vercel.app).
+CORS_ALLOWED_ORIGINS = env_list('CORS_ALLOWED_ORIGINS', ['http://localhost:5173'])
+# Keep CSRF aligned with CORS for cross-origin SPAs unless CSRF_TRUSTED_ORIGINS is set explicitly.
+CSRF_TRUSTED_ORIGINS = (
+    env_list('CSRF_TRUSTED_ORIGINS')
+    if env('CSRF_TRUSTED_ORIGINS') not in (None, '')
+    else list(CORS_ALLOWED_ORIGINS)
+)
 
 EMAIL_BACKEND = env('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
 DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', 'noreply@lexiai.local')
