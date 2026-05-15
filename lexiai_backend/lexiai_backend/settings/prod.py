@@ -1,4 +1,5 @@
 import os
+from urllib.parse import urlparse
 
 import dj_database_url
 
@@ -7,46 +8,92 @@ from .base import *  # noqa: F401,F403
 DEBUG = False
 
 
-def _secret_key_from_environ() -> str:
-    raw = (os.environ.get('SECRET_KEY') or '').strip()
-    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {'"', "'"}:
-        raw = raw[1:-1].strip()
-    return raw
+def _strip_quoted(raw: str) -> str:
+    s = (raw or '').strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in {'"', "'"}:
+        s = s[1:-1].strip()
+    return s
 
 
-_secret_raw = _secret_key_from_environ()
+def _env_stripped(name: str) -> str:
+    return _strip_quoted(os.environ.get(name, ''))
+
+
+def _require_env(name: str, guidance: str) -> str:
+    value = _env_stripped(name)
+    if not value:
+        raise RuntimeError(f'{name} is missing or empty. {guidance}')
+    return value
+
+
+_secret_raw = _env_stripped('SECRET_KEY')
 if not _secret_raw:
     raise RuntimeError(
-        'SECRET_KEY is not set. In Railway: Service → Variables → add '
-        'SECRET_KEY (shared variable or raw value). It must be at least 32 characters. '
-        'Generate locally: python -c "import secrets; print(secrets.token_urlsafe(64))"'
+        'SECRET_KEY is missing or empty. Railway → this service → Variables → SECRET_KEY '
+        '(>=32 characters). Generate: python -c "import secrets; print(secrets.token_urlsafe(64))"'
     )
 if len(_secret_raw) < 32:
     raise RuntimeError(
-        'SECRET_KEY must be at least 32 characters in production. '
-        'Railway Variables → SECRET_KEY — use a new token_urlsafe(64) value.'
+        f'SECRET_KEY must be at least 32 characters (got {len(_secret_raw)}). '
+        'Regenerate with token_urlsafe(64) and update Railway Variables.'
     )
 SECRET_KEY = _secret_raw
 
-database_url = (os.environ.get('DATABASE_URL') or '').strip()
-if not database_url:
-    raise RuntimeError('DATABASE_URL must be set for production.')
-
-redis_url = (os.environ.get('REDIS_URL') or '').strip()
-if not redis_url:
-    raise RuntimeError('REDIS_URL must be set for production.')
-
-ALLOWED_HOSTS = env_list('ALLOWED_HOSTS')
-if not ALLOWED_HOSTS:
-    raise RuntimeError('ALLOWED_HOSTS must be set for production.')
-
-DATABASES = {
-    'default': dj_database_url.config(
-        default=database_url,
-        conn_max_age=600,
-        ssl_require=True,
+database_url = _require_env(
+    'DATABASE_URL',
+    'Add PostgreSQL (New → Database → Postgres), open the database service → Variables, '
+    'then copy or reference DATABASE_URL on this web service and redeploy.',
+)
+_db_scheme = urlparse(database_url).scheme
+if _db_scheme not in {'postgres', 'postgresql'}:
+    raise RuntimeError(
+        f'DATABASE_URL must use postgres or postgresql (got {_db_scheme!r}). '
+        'Fix the value or the Railway variable reference.'
     )
-}
+
+redis_url = _require_env(
+    'REDIS_URL',
+    'Add Redis (plugin or Redis service), then copy or reference REDIS_URL on this service. '
+    'Required for Celery broker and Django cache in production.',
+)
+_redis_scheme = urlparse(redis_url).scheme
+if _redis_scheme not in {'redis', 'rediss'}:
+    raise RuntimeError(
+        f'REDIS_URL must use redis or rediss (got {_redis_scheme!r}). '
+        'Fix the connection string.'
+    )
+
+# Default `*` when unset so deploy works before the public hostname / frontend URL is known.
+# Set explicit comma-separated hosts in Railway Variables before exposing real traffic.
+_allowed = env_list('ALLOWED_HOSTS', ['*'])
+ALLOWED_HOSTS = _allowed if _allowed else ['*']
+
+if not CORS_ALLOWED_ORIGINS:
+    raise RuntimeError(
+        'CORS_ALLOWED_ORIGINS is missing or empty. Set comma-separated HTTPS origins for your '
+        'frontend (e.g. https://your-app.vercel.app). Browsers will block API calls without this.'
+    )
+if not CSRF_TRUSTED_ORIGINS:
+    raise RuntimeError(
+        'CSRF_TRUSTED_ORIGINS is missing or empty. For SPAs on a separate origin, set this to the '
+        'same browser-visible URLs as CORS_ALLOWED_ORIGINS (comma-separated, include https://).'
+    )
+
+_db_ssl_require = env_bool('DB_SSL_REQUIRE', True)
+try:
+    DATABASES = {
+        'default': dj_database_url.config(
+            default=database_url,
+            conn_max_age=env_int('DB_CONN_MAX_AGE', 600),
+            ssl_require=_db_ssl_require,
+        )
+    }
+except Exception as exc:
+    raise RuntimeError(
+        'Could not build Django database config from DATABASE_URL. '
+        'Check for typos, truncated paste, or special characters in the password (URL-encode if needed). '
+        'If Railway private networking rejects TLS, you may set DB_SSL_REQUIRE=false only after confirming risk.'
+    ) from exc
 
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 

@@ -11,6 +11,22 @@ if [ "${#SECRET_KEY}" -lt 32 ]; then
   echo "ERROR: SECRET_KEY must be at least 32 characters (length is ${#SECRET_KEY}). Regenerate and update Railway Variables." >&2
   exit 1
 fi
+if [ -z "${DATABASE_URL:-}" ]; then
+  echo "ERROR: DATABASE_URL is unset. Railway: add PostgreSQL (New → Database → Postgres). In the Postgres service, copy DATABASE_URL (Variables tab) into THIS web service's Variables as DATABASE_URL, or use Variable Reference. Redeploy." >&2
+  exit 1
+fi
+if [ -z "${REDIS_URL:-}" ]; then
+  echo "ERROR: REDIS_URL is unset. Railway: add Redis, then set REDIS_URL on THIS service (same pattern as DATABASE_URL). Required for Celery/cache in production." >&2
+  exit 1
+fi
+if [ -z "${CORS_ALLOWED_ORIGINS:-}" ]; then
+  echo "ERROR: CORS_ALLOWED_ORIGINS is unset. Set comma-separated HTTPS frontend origins (e.g. https://your-app.vercel.app)." >&2
+  exit 1
+fi
+if [ -z "${CSRF_TRUSTED_ORIGINS:-}" ]; then
+  echo "ERROR: CSRF_TRUSTED_ORIGINS is unset. Usually same origins as CORS for SPAs (comma-separated, include https://)." >&2
+  exit 1
+fi
 
 python manage.py migrate --noinput
 python manage.py collectstatic --noinput
