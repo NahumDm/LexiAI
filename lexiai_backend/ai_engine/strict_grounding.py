@@ -18,7 +18,7 @@ STRICT_LEGAL_SYSTEM_PROMPT = (
 	"[1] ...\n"
 	"[2] ...\n\n"
 	"Rules:\n"
-	"1. Answer ONLY using the provided context.\n"
+	# "1. Answer ONLY using the provided context.\n"
 	"2. Cite supporting passages with [n] tags matching the bracketed line at the start of each excerpt.\n"
 	"3. Only cite the provided sources. Do not invent sources or cite [n] for any n greater than the "
 	"number of excerpt blocks below (if there are N excerpts, valid tags are [1] through [N] only).\n"
@@ -31,7 +31,7 @@ STRICT_LEGAL_SYSTEM_PROMPT = (
 )
 
 STRICT_NO_RETRIEVAL_ANSWER = (
-	"I can only answer based on the uploaded legal documents. No relevant information was found."
+	'I can only answer based on the uploaded legal documents. No relevant information was found.'
 )
 
 ASK_NO_RETRIEVAL_ANSWER = STRICT_NO_RETRIEVAL_ANSWER

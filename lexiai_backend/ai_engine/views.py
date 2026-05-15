@@ -64,6 +64,7 @@ def _chat_response_to_response_body(chat_response) -> dict:
 	conf = float(_json_native(getattr(chat_response, 'confidence', chat_response.retrieval_confidence)))
 	return {
 		'answer': '' if chat_response.answer is None else str(chat_response.answer),
+		'source': str(getattr(chat_response, 'answer_source', None) or 'rag'),
 		'sources': _json_native(chat_response.sources or []),
 		'model_used': str(chat_response.model_used),
 		'tokens_used': {

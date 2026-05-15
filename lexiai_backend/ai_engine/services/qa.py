@@ -20,6 +20,7 @@ from ai_engine.query_classification import (
     classify_intent,
 )
 from ai_engine.services.llm import LLMError, generate_completion
+from ai_engine.services.llm_client import get_llm_client
 from ai_engine.services.search import semantic_search
 from ai_engine.strict_grounding import (
     STRICT_LEGAL_SYSTEM_PROMPT,
@@ -221,6 +222,38 @@ def generate_answer(
     )
 
     if not retrieved:
+        if getattr(settings, 'ALLOW_GENERAL_KNOWLEDGE_FALLBACK', True):
+            logger.info(
+                'generate_answer: zero chunks — general knowledge fallback user=%s',
+                getattr(user, 'pk', None),
+            )
+            gk = get_llm_client().generate_general_knowledge_response(stripped)
+            latency_ms = int((time.perf_counter() - started_at) * 1000)
+            warnings.extend(gk.warnings or [])
+            query_log_id: int | None = None
+            if save_log and user is not None:
+                query_log_id = _persist_query_log(
+                    user=user,
+                    query=stripped,
+                    retrieved_chunk_ids=[],
+                    answer=gk.answer,
+                    model_used=gk.model_used,
+                    retrieval_confidence=0.0,
+                    latency_ms=latency_ms,
+                )
+            return {
+                'answer': gk.answer,
+                'sources': [],
+                'model_used': gk.model_used,
+                'source': 'general_knowledge',
+                'retrieval_confidence': 0.0,
+                'confidence': 0.0,
+                'confidence_percent': 0.0,
+                'latency_ms': latency_ms,
+                'warnings': warnings,
+                'query_log_id': query_log_id,
+            }
+
         latency_ms = int((time.perf_counter() - started_at) * 1000)
         logger.info(
             'generate_answer: zero chunks above threshold — strict refusal user=%s',
@@ -369,8 +402,6 @@ def generate_answer(
     model_used = 'unknown'
     llm_failed = False
     try:
-        from ai_engine.services.llm_client import get_llm_client
-
         model_used = getattr(get_llm_client(), 'model', 'stub')
         answer = generate_completion(user_prompt, system_prompt=SYSTEM_PROMPT)
     except LLMError as exc:

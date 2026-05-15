@@ -3,7 +3,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -305,6 +305,25 @@ _COMPLIANT_ONE_CHUNK_ANSWER = (
 )
 
 
+class GeneralKnowledgeFallbackTests(APITestCase):
+	@override_settings(ALLOW_GENERAL_KNOWLEDGE_FALLBACK=True)
+	@patch('ai_engine.services.qa.get_llm_client')
+	@patch('ai_engine.services.qa.semantic_search', return_value=([], 0.0))
+	def test_ask_uses_general_knowledge_when_no_chunks(self, _search, mock_get_client):
+		mock_client = MagicMock()
+		mock_client.generate_general_knowledge_response.return_value = MagicMock(
+			answer='General knowledge answer.',
+			model_used='mistral-test',
+			warnings=['No document passages were retrieved; this answer uses general knowledge only.'],
+		)
+		mock_get_client.return_value = mock_client
+		user = User.objects.create_user(email='gk@example.com', password='password123')
+		out = generate_answer('What is VAT?', user=user, save_log=False)
+		self.assertEqual(out['answer'], 'General knowledge answer.')
+		self.assertEqual(out.get('source'), 'general_knowledge')
+		mock_client.generate_general_knowledge_response.assert_called_once()
+
+
 class AskGenerateAnswerRoutingTests(APITestCase):
 	"""Deterministic /ask routing when retrieval is empty or strict RAG when chunks exist."""
 
@@ -328,6 +347,7 @@ class AskGenerateAnswerRoutingTests(APITestCase):
 		self.assertEqual(out['sources'], [])
 		mock_search.assert_not_called()
 
+	@override_settings(ALLOW_GENERAL_KNOWLEDGE_FALLBACK=False)
 	@patch('ai_engine.services.qa.semantic_search')
 	def test_legal_no_chunks_strict_refusal(self, mock_search):
 		mock_search.return_value = ([], 0.0)

@@ -106,6 +106,49 @@ def _deterministic_chat_response(
 	return response
 
 
+def _general_knowledge_enabled() -> bool:
+	return bool(getattr(settings, 'ALLOW_GENERAL_KNOWLEDGE_FALLBACK', True))
+
+
+def _answer_from_general_knowledge(
+	pipeline: RAGPipeline,
+	*,
+	start_time,
+	conversation: Conversation,
+	work: str,
+	query_embedding,
+	save_log: bool,
+) -> ChatResponse:
+	logger.info('[RAG] No chunks — using Mistral general knowledge for query=%r', work[:200])
+	response = pipeline.llm_client.generate_general_knowledge_response(work)
+	response.answer_source = 'general_knowledge'
+
+	_rag_final_check(chunk_ids=[], max_similarity=0.0, confidence=0.0, refused=False)
+
+	if save_log:
+		latency_ms = int((timezone.now() - start_time).total_seconds() * 1000)
+		try:
+			log = QueryLog.objects.create(
+				user=conversation.owner,
+				conversation=conversation,
+				query_text=work,
+				query_embedding=EmbeddingService.embedding_to_bytes(query_embedding)
+				if query_embedding is not None
+				else None,
+				retrieved_chunk_ids=[],
+				llm_response=response.answer,
+				llm_model=response.model_used,
+				retrieval_confidence=0.0,
+				latency_ms=latency_ms,
+				token_usage=response.tokens_used,
+			)
+			response.query_log_id = log.id
+		except Exception as exc:
+			logger.error('RAG: failed to log general knowledge answer: %s', exc)
+
+	return response
+
+
 class RAGPipeline:
 	"""
 	Orchestrates document-grounded RAG.
@@ -248,6 +291,15 @@ class RAGPipeline:
 			)
 
 		if not retrieved_chunks:
+			if _general_knowledge_enabled():
+				return _answer_from_general_knowledge(
+					self,
+					start_time=start_time,
+					conversation=conversation,
+					work=work,
+					query_embedding=query_embedding,
+					save_log=save_log,
+				)
 			logger.info('RAG[3/5] zero chunks — strict refusal (no LLM)')
 			_rag_final_check(chunk_ids=[], max_similarity=0.0, confidence=0.0, refused=True)
 			return _deterministic_chat_response(
@@ -411,6 +463,8 @@ class RAGPipeline:
 			avg_confidence,
 			max_confidence,
 		)
+
+		response.answer_source = 'rag'
 
 		if save_log:
 			try:

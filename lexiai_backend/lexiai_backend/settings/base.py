@@ -303,6 +303,8 @@ AI_WARMUP_ON_STARTUP = env_bool('AI_WARMUP_ON_STARTUP', False)
 RAG_MIN_SIMILARITY = float(env('RAG_MIN_SIMILARITY', '0.2'))
 # Default number of chunks to send to the LLM after threshold filtering (cap cost / noise).
 RAG_DEFAULT_TOP_K = env_int('RAG_DEFAULT_TOP_K', 3)
+# When True, call Mistral with general knowledge if no document chunks qualify (chat + /ask/).
+ALLOW_GENERAL_KNOWLEDGE_FALLBACK = env_bool('ALLOW_GENERAL_KNOWLEDGE_FALLBACK', True)
 # SentenceTransformer.encode batch size inside Celery (lower = less RAM per document).
 EMBEDDING_BATCH_SIZE = env_int('EMBEDDING_BATCH_SIZE', 8)
 

@@ -20,6 +20,20 @@ logger = logging.getLogger(__name__)
 
 CONFIDENCE_THRESHOLD = 0.35
 
+GENERAL_KNOWLEDGE_SYSTEM_PROMPT = (
+	'You are a helpful legal and tax information assistant. '
+	'No excerpts from the user\'s uploaded documents are available for this question. '
+	'Answer using general knowledge. '
+	'State clearly that your answer is not based on the user\'s uploaded files. '
+	'Do not invent citations to specific documents or statutes you were not given. '
+	'Be concise, accurate, and professional.'
+)
+
+_GENERAL_KNOWLEDGE_UNAVAILABLE_ANSWER = (
+	'I could not search your uploaded documents for this question, and the assistant is '
+	'temporarily unavailable. Please try again later.'
+)
+
 
 def _answer_has_citation_tags(answer: str) -> bool:
 	if not answer:
@@ -76,6 +90,8 @@ class ChatResponse:
 	retrieval_confidence: float = 0.0
 	confidence: float = 0.0
 	warnings: list[str] = None
+	# ``rag`` (default) | ``general_knowledge`` when answering without retrieved chunks.
+	answer_source: str = 'rag'
 	# Set by RAGPipeline after QueryLog.objects.create
 	query_log_id: int | None = None
 
@@ -95,6 +111,91 @@ class LLMClient(ABC):
 	) -> ChatResponse:
 		"""Generate a response based on query and retrieved context."""
 		pass
+
+	def generate_general_knowledge_response(self, query: str) -> ChatResponse:
+		"""Answer from general knowledge when RAG retrieval is empty (never raises)."""
+		work = (query or '').strip()
+		if not work:
+			raise LLMError('Refusing to call LLM with empty prompt.')
+
+		warnings = [
+			'No document passages were retrieved; this answer uses general knowledge only.',
+		]
+
+		if isinstance(self, MistralLLMClient):
+			has_creds = _is_real_secret(self.api_key) or _is_real_secret(self.base_url)
+			if not has_creds:
+				logger.warning('General knowledge: Mistral credentials not configured')
+				return ChatResponse(
+					answer=_GENERAL_KNOWLEDGE_UNAVAILABLE_ANSWER,
+					sources=[],
+					model_used='n/a',
+					tokens_used={'prompt': 0, 'completion': 0, 'total': 0},
+					retrieval_confidence=0.0,
+					confidence=0.0,
+					warnings=warnings,
+					answer_source='general_knowledge',
+				)
+			user_prompt = (
+				f'User question:\n{work}\n\n'
+				'Provide a helpful answer from general knowledge.'
+			)
+			try:
+				answer, tokens_used = self._chat(GENERAL_KNOWLEDGE_SYSTEM_PROMPT, user_prompt)
+				return ChatResponse(
+					answer=answer,
+					sources=[],
+					model_used=self.model,
+					tokens_used=tokens_used,
+					retrieval_confidence=0.0,
+					confidence=0.0,
+					warnings=warnings,
+					answer_source='general_knowledge',
+				)
+			except Exception as exc:
+				logger.warning('General knowledge Mistral call failed: %s', exc)
+				return ChatResponse(
+					answer=_GENERAL_KNOWLEDGE_UNAVAILABLE_ANSWER,
+					sources=[],
+					model_used=self.model,
+					tokens_used={'prompt': 0, 'completion': 0, 'total': 0},
+					retrieval_confidence=0.0,
+					confidence=0.0,
+					warnings=warnings,
+					answer_source='general_knowledge',
+				)
+
+		from ai_engine.services.llm import generate_completion
+
+		model_used = getattr(self, 'model', None) or 'stub-v1'
+		try:
+			answer = generate_completion(
+				work,
+				system_prompt=GENERAL_KNOWLEDGE_SYSTEM_PROMPT,
+				client=self,
+			)
+			return ChatResponse(
+				answer=answer,
+				sources=[],
+				model_used=str(model_used),
+				tokens_used={'prompt': 0, 'completion': 0, 'total': 0},
+				retrieval_confidence=0.0,
+				confidence=0.0,
+				warnings=warnings,
+				answer_source='general_knowledge',
+			)
+		except LLMError as exc:
+			logger.warning('General knowledge LLM call failed: %s', exc)
+			return ChatResponse(
+				answer=_GENERAL_KNOWLEDGE_UNAVAILABLE_ANSWER,
+				sources=[],
+				model_used='n/a',
+				tokens_used={'prompt': 0, 'completion': 0, 'total': 0},
+				retrieval_confidence=0.0,
+				confidence=0.0,
+				warnings=warnings,
+				answer_source='general_knowledge',
+			)
 
 
 class StubLLMClient(LLMClient):
