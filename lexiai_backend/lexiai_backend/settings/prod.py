@@ -1,4 +1,5 @@
 import os
+import re
 from urllib.parse import urlparse
 
 import dj_database_url
@@ -51,6 +52,45 @@ if _db_scheme not in {'postgres', 'postgresql'}:
         'Fix the value or the Railway variable reference.'
     )
 
+def _finalize_redis_url(raw: str) -> tuple[str, str]:
+    """Return (canonical_url, scheme). Accepts redis/rediss; tolerates Railway quoting/BOM quirks."""
+    s = (raw or '').strip().lstrip('\ufeff')
+    if len(s) >= 2 and s[0] in '"\'' and s[-1] == s[0]:
+        s = s[1:-1].strip()
+    s = s.strip()
+    if not s:
+        raise RuntimeError('REDIS_URL is empty after trimming.')
+    if s.startswith('://'):
+        raise RuntimeError(
+            'REDIS_URL is invalid: it starts with "://" (scheme was cut off). '
+            'Paste the full value starting with rediss:// or redis:// from Upstash / Railway Redis.'
+        )
+    if '{{' in s or '${' in s:
+        raise RuntimeError(
+            'REDIS_URL contains template syntax that did not resolve (e.g. ${{ ... }}). '
+            'In Railway, set REDIS_URL via the variable reference picker or paste the literal URL.'
+        )
+    low = s.lower()
+    if low.startswith('https://') or low.startswith('http://'):
+        raise RuntimeError(
+            'REDIS_URL must not be an https:// or http:// URL (e.g. Upstash UPSTASH_REDIS_REST_URL). '
+            'Use the TLS TCP URL from Upstash -> Connect: rediss://default:PASSWORD@HOST:6379'
+        )
+    m = re.match(r'^(redis|rediss)://', s, re.IGNORECASE)
+    if m:
+        return s, m.group(1).lower()
+    if '://' not in s:
+        s = f'redis://{s.lstrip("/")}'
+    parsed = urlparse(s)
+    if parsed.scheme in {'redis', 'rediss'}:
+        return s, parsed.scheme
+    raise RuntimeError(
+        'REDIS_URL must start with redis:// or rediss:// (TLS). '
+        f'Parsed scheme was {parsed.scheme!r}. First 24 chars: {s[:24]!r}. '
+        'Remove stray quotes/newlines in Railway Variables and paste the full Upstash TCP URL.'
+    )
+
+
 redis_url = _env_stripped('REDIS_URL')
 if not redis_url:
     if _env_stripped('UPSTASH_REDIS_REST_URL'):
@@ -65,24 +105,7 @@ if not redis_url:
         'REDIS_URL is missing or empty. Add Redis (Upstash, Railway Redis, etc.), then set REDIS_URL on this service. '
         'Required for Celery broker and Django cache in production.'
     )
-_ru = redis_url.strip()
-_lower = _ru.lower()
-if _lower.startswith('https://') or _lower.startswith('http://'):
-    raise RuntimeError(
-        'REDIS_URL must not be an https:// or http:// URL (e.g. Upstash UPSTASH_REDIS_REST_URL). '
-        'Use the TLS TCP URL from Upstash -> Connect: rediss://default:PASSWORD@HOST:6379'
-    )
-# Railway / Docker sometimes paste "host:port/db" without a scheme; urlparse then yields scheme ''.
-if '://' not in _ru:
-    _ru = f'redis://{_ru.lstrip("/")}'
-redis_url = _ru
-_redis_scheme = urlparse(redis_url).scheme
-if _redis_scheme not in {'redis', 'rediss'}:
-    raise RuntimeError(
-        f'REDIS_URL must use redis or rediss (parsed scheme {_redis_scheme!r}). '
-        'Set a full URL from your Redis provider (e.g. redis://… or rediss://… on TLS). '
-        'Bare host:port values are auto-prefixed with redis://.'
-    )
+redis_url, _redis_scheme = _finalize_redis_url(redis_url)
 
 # `base` read REDIS_URL before normalization; align cache + Celery with the canonical URL.
 REDIS_URL = redis_url
