@@ -8,6 +8,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
+import { formatApiErrorMessage } from '@/lib/api/client';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -91,7 +92,11 @@ export default function RegisterPage() {
       });
       // Redirect happens via useEffect watching isAuthenticated
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Registration failed. Please try again.');
+      const msg =
+        err instanceof Error
+          ? err.message
+          : formatApiErrorMessage(err) || 'Registration failed. Please try again.';
+      setError(msg);
     } finally {
       setIsLoading(false);
     }

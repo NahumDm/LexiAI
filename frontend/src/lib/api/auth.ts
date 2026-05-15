@@ -3,7 +3,7 @@
  * Handles: login, register, logout, profile, token refresh
  */
 
-import { apiClient, ApiResponse } from './client';
+import { apiClient, ApiResponse, formatApiErrorMessage } from './client';
 
 export interface User {
   id: number;
@@ -189,10 +189,14 @@ export class AuthAPI {
    */
   static async registerAndLogin(data: RegisterRequest): Promise<ApiResponse<LoginResponse>> {
     const registerResponse = await this.register(data);
-    if (!registerResponse.data) {
+    if (registerResponse.status < 200 || registerResponse.status >= 300) {
+      const err =
+        (typeof registerResponse.error === 'string' && registerResponse.error.trim()) ||
+        formatApiErrorMessage(registerResponse.data) ||
+        'Registration failed.';
       return {
         status: registerResponse.status,
-        error: registerResponse.error || 'Registration failed',
+        error: err,
       };
     }
 

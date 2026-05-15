@@ -2,7 +2,7 @@
  * API module exports
  */
 
-export { apiClient, type ApiResponse, type ApiError } from './client';
+export { apiClient, formatApiErrorMessage, type ApiResponse, type ApiError } from './client';
 export { AuthAPI, type User, type LoginRequest, type LoginResponse } from './auth';
 export {
   ChatAPI,

@@ -44,6 +44,43 @@ const AUTH_ENDPOINT_PATTERNS = [
 const isAuthEndpoint = (endpoint: string): boolean =>
   AUTH_ENDPOINT_PATTERNS.some((pattern) => pattern.test(endpoint));
 
+/** Flatten DRF / SimpleJWT error JSON into a single human-readable string (never "[object Object]"). */
+export function formatApiErrorMessage(data: unknown): string {
+  if (data == null) return '';
+  if (typeof data === 'string') return data;
+  if (typeof data !== 'object' || Array.isArray(data)) return '';
+
+  const o = data as Record<string, unknown>;
+  if (typeof o.detail === 'string' && o.detail.trim()) return o.detail.trim();
+  if (Array.isArray(o.detail)) {
+    return o.detail
+      .map((d) => (typeof d === 'string' ? d : JSON.stringify(d)))
+      .filter(Boolean)
+      .join('; ');
+  }
+  if (o.detail != null && typeof o.detail === 'object') {
+    const nested = formatApiErrorMessage(o.detail);
+    if (nested) return nested;
+  }
+
+  const parts: string[] = [];
+  for (const [key, val] of Object.entries(o)) {
+    if (key === 'detail') continue;
+    if (Array.isArray(val)) {
+      for (const item of val) {
+        parts.push(
+          typeof item === 'string' ? `${key}: ${item}` : `${key}: ${JSON.stringify(item)}`
+        );
+      }
+    } else if (val != null && typeof val === 'object') {
+      parts.push(`${key}: ${JSON.stringify(val)}`);
+    } else if (val !== undefined && val !== null) {
+      parts.push(`${key}: ${String(val)}`);
+    }
+  }
+  return parts.join('; ');
+}
+
 const DEBUG_AUTH = (() => {
   try {
     return import.meta.env.DEV || import.meta.env.VITE_DEBUG_AUTH === 'true';
@@ -77,8 +114,13 @@ class ApiClient {
       // Dev: rely on Vite proxy (see vite.config.ts) so we stay same-origin.
       this.baseUrl = '';
     } else {
-      // Production build without VITE_API_BASE_URL — Docker on Windows often uses 18000 on the host.
-      this.baseUrl = 'http://127.0.0.1:18000';
+      // Production browser bundle: never default to localhost (Vercel users would hit their own machine).
+      this.baseUrl = '';
+      if (typeof window !== 'undefined') {
+        console.error(
+          '[LexiAI] VITE_API_BASE_URL was not set at build time. Set it in Vercel Environment Variables to your Django API origin (e.g. https://api.yourapp.com), then redeploy the frontend.'
+        );
+      }
     }
     this.apiVersion = import.meta.env.VITE_API_VERSION || 'v1';
 
@@ -355,20 +397,15 @@ class ApiClient {
 
       if (!response.ok) {
         const errObj = (data && typeof data === 'object' ? data : {}) as Record<string, unknown>;
-        let fallback = typeof errObj.detail === 'string' ? errObj.detail : '';
-        if (!fallback && data && typeof data === 'object' && !Array.isArray(data)) {
-          const msgs = Object.entries(errObj).flatMap(([field, msgs]) =>
-            Array.isArray(msgs)
-              ? msgs.map((m) => `${field}: ${m}`)
-              : [`${field}: ${String(msgs)}`]
-          );
-          if (msgs.length) fallback = msgs.join('; ');
-        }
+        const flattened = formatApiErrorMessage(data);
+        const fallback =
+          flattened ||
+          (typeof errObj.error === 'string' ? errObj.error : '') ||
+          (typeof errObj.message === 'string' ? errObj.message : '') ||
+          'Request failed';
         return {
           status: response.status,
-          error: fallback || (typeof errObj.error === 'string' ? errObj.error : '')
-            || (typeof errObj.message === 'string' ? errObj.message : '')
-            || 'Request failed',
+          error: fallback,
           data: data as T,
         };
       }

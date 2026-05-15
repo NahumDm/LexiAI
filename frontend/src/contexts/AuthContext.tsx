@@ -37,7 +37,7 @@ import React, {
   ReactNode,
 } from 'react';
 import { AuthAPI, type User } from '@/lib/api/auth';
-import { apiClient } from '@/lib/api/client';
+import { apiClient, formatApiErrorMessage } from '@/lib/api/client';
 import { useLocation, useNavigate } from 'react-router-dom';
 
 const GUEST_QUERY_LIMIT = 3;
@@ -275,7 +275,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           lastName = payload.last_name || '';
         }
 
-        const username = email.split('@')[0] || email;
+        // `username` is unique in Django; local-part of email alone collides (e.g. alice@a.com vs alice@b.com).
+        const username = email.slice(0, 150);
+
         const fullName = [firstName, lastName].filter(Boolean).join(' ').trim();
 
         const response = await AuthAPI.registerAndLogin({
@@ -287,7 +289,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         });
 
         if (!response.data?.access || !response.data?.user) {
-          const message = response.error || 'Registration failed.';
+          const message =
+            (typeof response.error === 'string' && response.error.trim()) ||
+            formatApiErrorMessage(response.data) ||
+            'Registration failed.';
           setError(message);
           throw new Error(message);
         }

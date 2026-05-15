@@ -13,7 +13,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { apiClient } from './client';
+import { apiClient, formatApiErrorMessage } from './client';
 
 const ACCESS_KEY = 'lexiai.access_token';
 const REFRESH_KEY = 'lexiai.refresh_token';
@@ -136,5 +136,19 @@ describe('apiClient — 401 handling', () => {
     expect(localStorage.getItem(ACCESS_KEY)).toBe('legacy-access');
     expect(localStorage.getItem(REFRESH_KEY)).toBe('legacy-refresh');
     expect(sessionStorage.getItem('access_token')).toBeNull();
+  });
+});
+
+describe('formatApiErrorMessage', () => {
+  it('flattens DRF field errors without object stringification', () => {
+    const s = formatApiErrorMessage({ email: ['A user with that email already exists.'] });
+    expect(s).toContain('email:');
+    expect(s).toContain('already exists');
+    expect(s).not.toContain('[object Object]');
+  });
+
+  it('handles nested detail object via JSON', () => {
+    const s = formatApiErrorMessage({ detail: { code: 'invalid' } });
+    expect(s.length).toBeGreaterThan(0);
   });
 });
