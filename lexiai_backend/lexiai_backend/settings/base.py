@@ -76,7 +76,8 @@ def build_database_config() -> dict[str, Any]:
     }
 
 
-SECRET_KEY = env('SECRET_KEY', 'dev-unsafe-secret-key-change-me')
+_DEFAULT_DEV_SECRET_KEY = 'dev-unsafe-secret-key-change-me'
+SECRET_KEY = env('SECRET_KEY', _DEFAULT_DEV_SECRET_KEY)
 DEBUG = env_bool('DEBUG', False)
 ALLOWED_HOSTS = env_list('ALLOWED_HOSTS', ['localhost', '127.0.0.1', 'web'])
 
@@ -111,14 +112,20 @@ def _secret_key_is_weak(value: str) -> bool:
 # additionally raises if SECRET_KEY is missing entirely; this catches "present
 # but unsafe".
 if not DEBUG and _secret_key_is_weak(SECRET_KEY):
-    import logging as _logging
-    _logging.getLogger(__name__).error(
-        'SECRET_KEY is weak or default (length=%s). Production deployments '
-        'MUST set SECRET_KEY to a high-entropy value >=%s chars. Generate with: '
-        'python -c "import secrets; print(secrets.token_urlsafe(64))"',
-        len(SECRET_KEY or ''),
-        _MIN_SECRET_KEY_LENGTH,
-    )
+    # Avoid duplicate noise: prod settings replace SECRET_KEY and raise if unset.
+    _prod_settings = os.environ.get('DJANGO_SETTINGS_MODULE', '').endswith('lexiai_backend.settings.prod')
+    if _prod_settings and SECRET_KEY == _DEFAULT_DEV_SECRET_KEY:
+        pass
+    else:
+        import logging as _logging
+
+        _logging.getLogger(__name__).error(
+            'SECRET_KEY is weak or default (length=%s). Production deployments '
+            'MUST set SECRET_KEY to a high-entropy value >=%s chars. Generate with: '
+            'python -c "import secrets; print(secrets.token_urlsafe(64))"',
+            len(SECRET_KEY or ''),
+            _MIN_SECRET_KEY_LENGTH,
+        )
 
 INSTALLED_APPS = [
     'django.contrib.admin',
