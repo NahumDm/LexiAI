@@ -3,38 +3,26 @@
  *
  * Manages global auth state, user info, and login/logout flows.
  *
- * Production-grade guarantees (after the post-mortem fix):
- *  - Auth state is hydrated SYNCHRONOUSLY from localStorage on mount, so
- *    ProtectedRoute does not flicker the login screen on reload.
- *  - `initializeAuth` runs EXACTLY ONCE per AuthProvider mount — not on every
- *    navigation. Previously the effect depended on `location.pathname`, which
- *    caused redundant `/auth/profile/` calls on every route change and a race
- *    with `handleLogin`'s state writes during the /login → /chat transition.
+ * Production-grade guarantees:
+ *  - `user` / guest flags are hydrated synchronously from storage on first
+ *    render so the UI can show stable data, but `isLoading` stays true until
+ *    the one-time `initAuth` effect finishes (token profile check or fast no-op).
+ *    That prevents refresh races where route guards redirect before validation.
+ *  - `initAuth` runs EXACTLY ONCE per AuthProvider mount — not on every
+ *    navigation.
  *  - The 401-redirect handler uses refs (not closures) for `navigate` /
  *    `location`, so it always sees the LATEST route without re-binding the
  *    handler on every render.
  *  - Token storage lives in `localStorage` (via apiClient), so sessions
  *    survive reloads and new tabs.
  *
- * SESSION ISOLATION (auth-leakage fix)
+ * ROLE / ROUTE SEPARATION
  * ────────────────────────────────────────────────────────────────
- * The user app and the admin console share ONE backend and ONE JWT pair,
- * but a single browser session is allowed to flow through ONLY ONE
- * surface at a time. Concretely:
- *
- *   - A staff/superuser is NEVER allowed to ride their admin session
- *     into a user-facing route (`/`, `/chat`, `/account`). Hitting one
- *     tears down the session and routes to `/login`.
- *   - A regular user trying to sign in via `/login` while holding
- *     `is_staff || is_superuser` is REJECTED at login time so admin
- *     credentials never end up in the user app even momentarily.
- *   - The non-admin → admin direction is already blocked by
- *     `AdminLayout` / `ProtectedRoute(requireAdmin)` (they send the
- *     visitor to `/admin-login`). That direction is untouched here.
- *
- * The centralised guard (`useEffect` below) is the single source of
- * truth for "admin in user app". `LandingPage` and any future user
- * page can rely on it — they do NOT need to duplicate the cleanup.
+ * User vs admin (Django `is_staff` / `is_superuser`) surfaces are kept
+ * disjoint by `getNavigationRedirect` + `RouteMiddleware` (see
+ * `src/lib/routeAuth.ts`). Staff accounts must use `/admin/login`, not
+ * `/login` — `handleLogin` still rejects staff on the user form so tokens
+ * never land in the user app from that path.
  */
 
 'use client';
@@ -56,33 +44,6 @@ const GUEST_QUERY_LIMIT = 3;
 const GUEST_FLAG_KEY = 'lexiai.is_guest';
 const GUEST_REMAINING_KEY = 'lexiai.guest_queries_remaining';
 
-/**
- * Route classification used by the session-isolation guard. Exported so
- * route guards / pages can reason about the SAME boundaries the context
- * enforces — there is exactly one definition of "user route" and
- * "admin route" in the SPA.
- *
- *   isAdminRoute('/admin')        → true
- *   isAdminRoute('/admin/users')  → true
- *   isAdminRoute('/admin-login')  → true   (admin auth surface)
- *   isUserRoute('/')              → true
- *   isUserRoute('/chat')          → true
- *   isUserRoute('/chat/123')      → true
- *   isUserRoute('/account')       → true
- *   isUserRoute('/login')         → false  (auth-neutral)
- *   isUserRoute('/register')      → false  (auth-neutral)
- *
- * Auth-neutral paths (`/login`, `/register`) intentionally fall into
- * NEITHER bucket so the guard never tears down a session mid-login.
- */
-export const isAdminRoute = (path: string): boolean =>
-  path.startsWith('/admin');
-
-export const isUserRoute = (path: string): boolean =>
-  path === '/' ||
-  path.startsWith('/chat') ||
-  path.startsWith('/account');
-
 type RegisterInput =
   | {
       email: string;
@@ -93,6 +54,7 @@ type RegisterInput =
   | [name: string, email: string, password: string];
 
 export interface AuthContextType {
+  /** Core surface: `user`, `isAuthenticated`, `isAdmin`, `login`, `logout` (+ extras below). */
   user: User | null;
   isLoading: boolean;
   isAuthenticated: boolean;
@@ -154,10 +116,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     readGuestRemaining()
   );
 
-  // Hydrated synchronously above ⇒ no need to keep isLoading=true if a user
-  // was already present in storage. We only stay "loading" while we
-  // background-validate the token.
-  const [isLoading, setIsLoading] = useState<boolean>(() => apiClient.hasToken() && !!hydrateInitialUser());
+  // Stay true until initAuth completes so gates/middleware don't mis-route on reload.
+  const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const navigate = useNavigate();
@@ -170,24 +130,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => { navigateRef.current = navigate; }, [navigate]);
   useEffect(() => { locationRef.current = location; }, [location]);
 
-  // --- One-time initialization: validate token via /auth/profile/ ----------
+  // --- One-time init: validate stored token via /auth/profile/ ------------
   useEffect(() => {
     let cancelled = false;
 
-    const initialize = async () => {
+    const initAuth = async () => {
       try {
         if (!apiClient.hasToken()) {
-          // No token → make sure local state is consistent.
           if (apiClient.getStoredUser() !== null) apiClient.clearStoredUser();
-          if (!cancelled) {
-            setUser(null);
-            setIsLoading(false);
-          }
+          if (!cancelled) setUser(null);
           return;
         }
 
-        // Background validation. We already rendered with the hydrated user,
-        // so this is a "freshness check" not a gating call.
         const response = await AuthAPI.getCurrentUser();
         if (cancelled) return;
 
@@ -195,12 +149,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setUser(response.data);
           apiClient.setStoredUser(response.data);
         } else if (response.status === 401) {
-          // Token is dead (and refresh already failed inside apiClient, which
-          // will have invoked our unauthorized handler). Clear local mirror.
           setUser(null);
           apiClient.clearStoredUser();
         }
-        // Any other failure (network, 5xx, etc.) → keep hydrated user.
       } catch (err) {
         console.error('[auth] init error:', err);
       } finally {
@@ -208,8 +159,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     };
 
-    initialize();
-    return () => { cancelled = true; };
+    initAuth();
+    return () => {
+      cancelled = true;
+    };
     // Intentionally empty deps: this MUST run only once per mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -227,61 +180,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch { /* ignore */ }
       apiClient.logout();
 
-      // Don't bounce-redirect if we're already on an auth page.
       const path = locationRef.current?.pathname ?? '/';
-      const isAuthPage = path === '/login' || path === '/register' || path === '/';
+      const isAuthPage =
+        path === '/login' ||
+        path === '/register' ||
+        path === '/' ||
+        path === '/admin/login' ||
+        path.startsWith('/admin/login/');
       if (!isAuthPage) {
-        navigateRef.current('/login', { replace: true, state: { from: path } });
+        const target = path.startsWith('/admin') ? '/admin/login' : '/login';
+        navigateRef.current(target, { replace: true, state: { from: path } });
       }
     });
 
     return () => { apiClient.clearUnauthorizedHandler(); };
   }, []);
-
-  // --- Session-isolation guard --------------------------------------------
-  //
-  // Fires every time `user` or `location.pathname` changes. If a
-  // staff/superuser is detected on a USER-facing route (`/`, `/chat`,
-  // `/account`), we synchronously tear down the session and route the
-  // browser to `/login`. This is the canonical fix for the auth-leakage
-  // bug: localStorage tokens are shared, so a fresh tab on `/chat`
-  // would otherwise auto-authenticate as the admin and skip the user
-  // landing page entirely.
-  //
-  // Notes:
-  //   - We DO NOT redirect non-admins away from admin routes here —
-  //     that's still owned by `AdminLayout` / `ProtectedRoute`. This
-  //     guard is one-directional (admin → user).
-  //   - We fire `AuthAPI.logout()` background-only so the navigation is
-  //     not blocked on a server round-trip; tokens are cleared locally
-  //     via `apiClient.logout()` immediately.
-  useEffect(() => {
-    if (!user) return;
-    const isAdminAccount = !!(user.is_staff || user.is_superuser);
-    if (!isAdminAccount) return;
-
-    const path = location.pathname;
-    if (!isUserRoute(path)) return;
-
-    // Fire-and-forget refresh-token blacklist; we don't await it so the
-    // navigation below is instant.
-    AuthAPI.logout().catch((err) => {
-      console.warn('[auth] leakage guard: background blacklist failed', err);
-    });
-
-    apiClient.logout();
-    apiClient.clearStoredUser();
-    setUser(null);
-    setIsGuest(false);
-    setGuestQueriesRemaining(GUEST_QUERY_LIMIT);
-    try {
-      safeStorage()?.removeItem(GUEST_FLAG_KEY);
-      safeStorage()?.removeItem(GUEST_REMAINING_KEY);
-    } catch { /* ignore */ }
-    setError('Admin sessions are isolated from the user app. Please sign in again.');
-
-    navigate('/login', { replace: true, state: { from: path } });
-  }, [user, location.pathname, navigate]);
 
   // --- Login --------------------------------------------------------------
   const handleLogin = useCallback(async (email: string, password: string) => {
@@ -301,7 +214,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       const userData = response.data.user;
 
-      // STRICT SESSION ISOLATION: staff/superusers MUST use /admin-login.
+      // Staff/superusers MUST use /admin/login (admin sign-in surface).
       // Reverse the just-completed authentication (blacklist + token wipe)
       // BEFORE we touch React state so the user never sees a flash of the
       // user app and the leakage guard never has to clean up after us.
@@ -315,7 +228,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         apiClient.logout();
         apiClient.clearStoredUser();
         const message =
-          'Admin accounts must sign in at /admin-login. This login form is for regular users only.';
+          'Admin accounts must sign in at /admin/login. This login form is for regular users only.';
         setError(message);
         throw new Error(message);
       }
@@ -399,6 +312,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // --- Logout -------------------------------------------------------------
   const handleLogout = useCallback(async () => {
+    const wasAdmin =
+      !!user &&
+      !isGuest &&
+      !!(user.is_staff || user.is_superuser);
+
     setIsLoading(true);
     try {
       await AuthAPI.logout();
@@ -412,11 +330,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         safeStorage()?.removeItem(GUEST_FLAG_KEY);
         safeStorage()?.removeItem(GUEST_REMAINING_KEY);
       } catch { /* ignore */ }
-      apiClient.clearStoredUser();
+      apiClient.logout();
       setIsLoading(false);
-      navigate('/');
+      const next = wasAdmin ? '/admin/login' : '/';
+      window.location.replace(next);
     }
-  }, [navigate]);
+  }, [user, isGuest]);
 
   // --- Refresh user data --------------------------------------------------
   const handleRefreshUser = useCallback(async () => {
@@ -482,7 +401,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     isLoading,
     // Preserve original semantic: guests carry a JWT for API calls but are
     // NOT "authenticated" in the UI sense — they cannot access protected
-    // routes that omit `allowGuest`. ProtectedRoute handles this:
+    // routes that omit `allowGuest`. `UserRoute` / `ProtectedRoute` handle this:
     //   if (!isAuthenticated && !(allowGuest && isGuest)) redirect
     isAuthenticated: !!user && !isGuest,
     isGuest,

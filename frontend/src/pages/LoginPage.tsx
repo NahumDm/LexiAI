@@ -5,8 +5,8 @@
 
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -17,23 +17,7 @@ import { Eye, EyeOff, Loader2, AlertCircle } from 'lucide-react';
 
 export default function LoginPage() {
   const navigate = useNavigate();
-  const location = useLocation();
-  const { isAuthenticated, login } = useAuth();
-
-  // If the user is ALREADY authenticated (e.g. they hit /login with a live
-  // session), bounce them to the originally-intended page. We deliberately do
-  // NOT use this effect as the post-login redirect mechanism — handleLogin in
-  // AuthContext owns the post-login navigate(/chat) to avoid double-nav.
-  useEffect(() => {
-    if (isAuthenticated) {
-      const fromState = (location.state as { from?: string | { pathname?: string } } | null)?.from;
-      const from =
-        typeof fromState === 'string'
-          ? fromState
-          : fromState?.pathname || '/chat';
-      navigate(from, { replace: true });
-    }
-  }, [isAuthenticated, navigate, location.state]);
+  const { login } = useAuth();
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');

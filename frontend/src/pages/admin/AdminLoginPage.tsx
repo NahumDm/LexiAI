@@ -1,5 +1,5 @@
 /**
- * Admin Login Page (/admin-login)
+ * Admin Login Page (`/admin/login`)
  *
  * Standalone form that ONLY admits Django staff / superusers into the SPA
  * admin dashboard. Intentionally isolated from the regular `/login` flow:
@@ -20,7 +20,7 @@
 
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { AuthAPI } from '@/lib/api/auth';
@@ -36,23 +36,13 @@ const ACCESS_DENIED_MESSAGE = 'Access denied: Admin privileges required.';
 
 export default function AdminLoginPage() {
   const navigate = useNavigate();
-  const { isAdmin, isAuthenticated, refreshUser, logout } = useAuth();
+  const { refreshUser } = useAuth();
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState('');
-
-  // If a staff user lands here while already signed in (e.g. they bookmarked
-  // /admin-login), short-circuit straight to the dashboard. Non-admins who
-  // were already authenticated stay on this page so they can either log out
-  // or switch accounts — we don't auto-bounce them to /chat.
-  useEffect(() => {
-    if (isAuthenticated && isAdmin) {
-      navigate('/admin', { replace: true });
-    }
-  }, [isAuthenticated, isAdmin, navigate]);
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -108,11 +98,6 @@ export default function AdminLoginPage() {
     } finally {
       setIsSubmitting(false);
     }
-  };
-
-  const handleSignOut = async () => {
-    setError('');
-    await logout();
   };
 
   return (
@@ -204,22 +189,6 @@ export default function AdminLoginPage() {
               )}
             </Button>
           </form>
-
-          {isAuthenticated && !isAdmin && (
-            <div className="mt-6 pt-6 border-t border-border text-center text-xs text-muted-foreground">
-              <p>
-                You're signed in as a regular user.{' '}
-                <button
-                  type="button"
-                  className="underline underline-offset-2 hover:text-foreground"
-                  onClick={handleSignOut}
-                >
-                  Sign out
-                </button>{' '}
-                to switch accounts.
-              </p>
-            </div>
-          )}
         </div>
 
         <p className="mt-6 text-center text-xs text-muted-foreground">

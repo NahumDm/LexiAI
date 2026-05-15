@@ -21,7 +21,6 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { useAuth } from '@/contexts/AuthContext';
 import { useChat } from '@/contexts/ChatContext';
-import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { AlertCircle, Loader2 } from 'lucide-react';
 import type { Conversation } from '@/lib/api/chat';
 import { ChatAPI } from '@/lib/api/chat';
@@ -163,8 +162,7 @@ export default function ChatPage() {
 	};
 
 	return (
-		<ProtectedRoute allowGuest>
-			<div className="flex flex-col h-screen bg-background">
+		<div className="flex flex-col h-screen bg-background">
 				<Header />
 
 				<div className="flex flex-1 overflow-hidden">
@@ -253,6 +251,5 @@ export default function ChatPage() {
 					</div>
 				</div>
 			</div>
-		</ProtectedRoute>
 	);
 }

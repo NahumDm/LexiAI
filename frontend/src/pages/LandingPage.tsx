@@ -15,22 +15,9 @@ export default function LandingPage() {
   const [showLogin, setShowLogin] = useState(false);
   const [showRegister, setShowRegister] = useState(false);
 
-  // SESSION ISOLATION
-  // ----------------------------------------------------------------
-  // Auto-routing logic for visitors who already have a session.
-  //
-  //   - Admins on `/` MUST NOT be silently bounced to `/admin`.
-  //     Doing so was the original auth-leakage bug — a localStorage
-  //     JWT from `/admin-login` would auto-authenticate the admin
-  //     into the user app the moment they typed `/`. The dedicated
-  //     guard inside `AuthContext` now tears down the admin session
-  //     and redirects to `/login` whenever an admin lands on a
-  //     user route (`/`, `/chat`, `/account`). We INTENTIONALLY do
-  //     nothing for admins here so the centralised guard owns the
-  //     teardown path and there is no race between two `navigate()`
-  //     calls.
-  //   - Non-admin authenticated users go straight to `/chat`, their
-  //     post-login destination.
+  // Non-admin authenticated visitors: go to the main app. Admins are sent
+  // to `/admin` by `RouteMiddleware` + `getNavigationRedirect` (never mixed
+  // with user routes).
   React.useEffect(() => {
     if (!isAuthenticated) return;
     if (isAdminUser) return;

@@ -22,7 +22,7 @@ interface ProtectedRouteProps {
   allowGuest?: boolean;
   /**
    * Where to send a logged-in NON-admin who hits an admin-gated route. We
-   * default to `/admin-login` so the admin flow stays self-contained: a user
+   * default to `/admin/login` so the admin flow stays self-contained: a user
    * who reaches an admin URL by mistake is offered the dedicated admin sign-in
    * (where they can switch accounts) rather than being silently bounced to
    * `/chat`. Set to `/chat` to preserve the legacy behaviour.
@@ -36,7 +36,7 @@ export const ProtectedRoute = ({
   fallback,
   redirectTo = '/login',
   allowGuest = false,
-  adminRedirectTo = '/admin-login',
+  adminRedirectTo = '/admin/login',
 }: ProtectedRouteProps) => {
   const { isAuthenticated, isAdmin, isLoading, isGuest } = useAuth();
   const location = useLocation();

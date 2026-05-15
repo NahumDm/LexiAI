@@ -3,7 +3,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Header } from '@/components/layout/Header';
-import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -73,8 +72,7 @@ export default function AccountPage() {
   };
 
   return (
-    <ProtectedRoute>
-      <div className="min-h-screen bg-background flex flex-col">
+    <div className="min-h-screen bg-background flex flex-col">
         <Header variant="app" />
         <main className="flex-1 max-w-xl mx-auto w-full px-4 py-8 space-y-6">
           <Link
@@ -159,6 +157,5 @@ export default function AccountPage() {
           </Card>
         </main>
       </div>
-    </ProtectedRoute>
   );
 }
