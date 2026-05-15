@@ -434,7 +434,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
   }, [isGuest]);
 
-  const isAdminAuthenticated = isStaffUser(adminUser);
+  // Require admin-scoped JWT + staff profile (never infer from user session / user storage).
+  const isAdminAuthenticated =
+    apiClient.hasToken('admin') && isStaffUser(adminUser);
 
   const value: AuthContextType = {
     user,

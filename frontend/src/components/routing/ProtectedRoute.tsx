@@ -35,10 +35,7 @@ export function UserRoute({ children }: { children: ReactNode }) {
   const { isAuthenticated, isGuest, isAdminAuthenticated, isLoading } = useAuth();
 
   if (isLoading) return <RouteSpinner />;
-  if (!isAuthenticated && !isGuest) {
-    if (isAdminAuthenticated) return <Navigate to="/login" replace />;
-    return <Navigate to="/login" replace />;
-  }
+  if (!isAuthenticated && !isGuest) return <Navigate to="/login" replace />;
   return <>{children}</>;
 }
 
