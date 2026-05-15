@@ -23,10 +23,7 @@ if [ -z "${CORS_ALLOWED_ORIGINS:-}" ]; then
   echo "ERROR: CORS_ALLOWED_ORIGINS is unset. Set comma-separated HTTPS frontend origins (e.g. https://your-app.vercel.app)." >&2
   exit 1
 fi
-if [ -z "${CSRF_TRUSTED_ORIGINS:-}" ]; then
-  echo "ERROR: CSRF_TRUSTED_ORIGINS is unset. Usually same origins as CORS for SPAs (comma-separated, include https://)." >&2
-  exit 1
-fi
+# CSRF_TRUSTED_ORIGINS is optional: prod settings mirror CORS when it is unset.
 
 python manage.py migrate --noinput
 python manage.py collectstatic --noinput

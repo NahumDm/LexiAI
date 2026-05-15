@@ -15,8 +15,8 @@ if [ -z "${REDIS_URL:-}" ]; then
   echo "ERROR: REDIS_URL is unset on the worker. Copy REDIS_URL into this worker service (Celery broker)." >&2
   exit 1
 fi
-if [ -z "${CORS_ALLOWED_ORIGINS:-}" ] || [ -z "${CSRF_TRUSTED_ORIGINS:-}" ]; then
-  echo "ERROR: CORS_ALLOWED_ORIGINS and CSRF_TRUSTED_ORIGINS must be set (Django loads prod settings). Copy from web service." >&2
+if [ -z "${CORS_ALLOWED_ORIGINS:-}" ]; then
+  echo "ERROR: CORS_ALLOWED_ORIGINS is unset on the worker. Copy the same CORS_ALLOWED_ORIGINS as the web service (prod mirrors CSRF from CORS if CSRF_TRUSTED_ORIGINS is unset)." >&2
   exit 1
 fi
 
