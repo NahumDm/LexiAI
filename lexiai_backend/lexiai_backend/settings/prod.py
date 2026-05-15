@@ -52,6 +52,15 @@ if _db_scheme not in {'postgres', 'postgresql'}:
         'Fix the value or the Railway variable reference.'
     )
 
+
+def _extract_embedded_redis_url(s: str) -> str | None:
+    """First redis:// or rediss:// token in a longer paste (e.g. redis-cli -u 'rediss://…')."""
+    m = re.search(r'(redis|rediss)://\S+', s, re.IGNORECASE)
+    if not m:
+        return None
+    return m.group(0).rstrip('"\').,;)]}\\')
+
+
 def _finalize_redis_url(raw: str) -> tuple[str, str]:
     """Return (canonical_url, scheme). Accepts redis/rediss; tolerates Railway quoting/BOM quirks."""
     s = (raw or '').strip().lstrip('\ufeff')
@@ -76,6 +85,19 @@ def _finalize_redis_url(raw: str) -> tuple[str, str]:
             'REDIS_URL must not be an https:// or http:// URL (e.g. Upstash UPSTASH_REDIS_REST_URL). '
             'Use the TLS TCP URL from Upstash -> Connect: rediss://default:PASSWORD@HOST:6379'
         )
+    # Pasted Upstash "redis-cli --tls -u …" line without the actual DSN (truncated after -u).
+    if re.match(r'^\s*(?:[$#]\s*)?(?:sudo\s+)?redis-cli\b', s, re.IGNORECASE) and not re.search(
+        r'(redis|rediss)://', s, re.IGNORECASE
+    ):
+        raise RuntimeError(
+            'REDIS_URL looks like a redis-cli command, but there is no redis:// or rediss:// URL in it '
+            '(often the value after -u was cut off). In Upstash: your database -> Connect, copy only the '
+            'connection string that starts with rediss://..., not the redis-cli wrapper.'
+        )
+    if not re.match(r'^(redis|rediss)://', s, re.IGNORECASE):
+        embedded = _extract_embedded_redis_url(s)
+        if embedded:
+            s = embedded
     m = re.match(r'^(redis|rediss)://', s, re.IGNORECASE)
     if m:
         return s, m.group(1).lower()
@@ -123,6 +145,19 @@ CELERY_RESULT_BACKEND = _celery_result or CELERY_BROKER_URL
 _allowed = env_list('ALLOWED_HOSTS', ['*'])
 ALLOWED_HOSTS = _allowed if _allowed else ['*']
 
+def _split_origins_no_path(csv: str) -> list[str]:
+    """django-cors-headers E014: each origin must be scheme+host+port only (no path, no trailing /)."""
+    out: list[str] = []
+    for part in csv.split(','):
+        p = part.strip()
+        if not p:
+            continue
+        while p.endswith('/'):
+            p = p[:-1].rstrip()
+        out.append(p)
+    return out
+
+
 # Do not rely on base.py localhost default in production: require explicit browser origins.
 _cors_env = _env_stripped('CORS_ALLOWED_ORIGINS')
 if not _cors_env:
@@ -130,11 +165,11 @@ if not _cors_env:
         'CORS_ALLOWED_ORIGINS is missing or empty. Set comma-separated HTTPS origins for your '
         'frontend (e.g. https://your-app.vercel.app). Browsers will block API calls without this.'
     )
-CORS_ALLOWED_ORIGINS = [p.strip() for p in _cors_env.split(',') if p.strip()]
+CORS_ALLOWED_ORIGINS = _split_origins_no_path(_cors_env)
 
 _csrf_env = _env_stripped('CSRF_TRUSTED_ORIGINS')
 if _csrf_env:
-    CSRF_TRUSTED_ORIGINS = [p.strip() for p in _csrf_env.split(',') if p.strip()]
+    CSRF_TRUSTED_ORIGINS = _split_origins_no_path(_csrf_env)
 else:
     CSRF_TRUSTED_ORIGINS = list(CORS_ALLOWED_ORIGINS)
 
