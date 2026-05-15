@@ -1,5 +1,6 @@
 import os
 import re
+import ssl
 from urllib.parse import urlparse
 
 import dj_database_url
@@ -131,10 +132,25 @@ redis_url, _redis_scheme = _finalize_redis_url(redis_url)
 
 # `base` read REDIS_URL before normalization; align cache + Celery with the canonical URL.
 REDIS_URL = redis_url
-CACHES['default'] = {
-    'BACKEND': 'django.core.cache.backends.redis.RedisCache',
-    'LOCATION': REDIS_URL,
-}
+
+_redis_cache_options: dict = {}
+if _redis_scheme == 'rediss':
+    # Upstash / managed Redis often need relaxed cert verification via redis-py.
+    _redis_cache_options['ssl_cert_reqs'] = ssl.CERT_NONE
+
+if env_bool('CACHE_USE_LOCUMEM', False):
+    CACHES['default'] = {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'lexiai-prod-cache',
+    }
+else:
+    _cache_cfg: dict = {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': REDIS_URL,
+    }
+    if _redis_cache_options:
+        _cache_cfg['OPTIONS'] = _redis_cache_options
+    CACHES['default'] = _cache_cfg
 _celery_broker = _env_stripped('CELERY_BROKER_URL')
 _celery_result = _env_stripped('CELERY_RESULT_BACKEND')
 CELERY_BROKER_URL = _celery_broker or REDIS_URL
@@ -158,14 +174,23 @@ def _split_origins_no_path(csv: str) -> list[str]:
     return out
 
 
-# Do not rely on base.py localhost default in production: require explicit browser origins.
+# CORS: explicit origins by default. Set CORS_ALLOW_ALL_ORIGINS=true only for short-lived debugging
+# (echoes request Origin; still prefer locking to https://your-app.vercel.app in production).
+_cors_debug_all = env_bool('CORS_ALLOW_ALL_ORIGINS', False)
 _cors_env = _env_stripped('CORS_ALLOWED_ORIGINS')
-if not _cors_env:
-    raise RuntimeError(
-        'CORS_ALLOWED_ORIGINS is missing or empty. Set comma-separated HTTPS origins for your '
-        'frontend (e.g. https://your-app.vercel.app). Browsers will block API calls without this.'
-    )
-CORS_ALLOWED_ORIGINS = _split_origins_no_path(_cors_env)
+
+if _cors_debug_all:
+    CORS_ALLOW_ALL_ORIGINS = True
+    CORS_ALLOWED_ORIGINS = _split_origins_no_path(_cors_env) if _cors_env else []
+else:
+    CORS_ALLOW_ALL_ORIGINS = False
+    if not _cors_env:
+        raise RuntimeError(
+            'CORS_ALLOWED_ORIGINS is missing or empty. Set comma-separated HTTPS origins for your '
+            'frontend (e.g. https://lexiai-one.vercel.app). Browsers will block API calls without this. '
+            'For emergency debugging only, set CORS_ALLOW_ALL_ORIGINS=true (then fix explicit origins).'
+        )
+    CORS_ALLOWED_ORIGINS = _split_origins_no_path(_cors_env)
 
 _csrf_env = _env_stripped('CSRF_TRUSTED_ORIGINS')
 if _csrf_env:

@@ -26,6 +26,8 @@ fi
 # CSRF_TRUSTED_ORIGINS is optional: prod settings mirror CORS when it is unset.
 
 python manage.py migrate --noinput
+# JWT blacklist tables are required for login/guest (OutstandingToken); explicit app avoids silent skips.
+python manage.py migrate token_blacklist --noinput
 python manage.py collectstatic --noinput
 
 gunicorn lexiai_backend.wsgi:application \

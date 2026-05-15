@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from django.contrib.auth import get_user_model
+from django.db import IntegrityError
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
@@ -69,6 +70,12 @@ class AccountProfileSerializer(serializers.ModelSerializer):
             profile.save()
         return instance
 
+    def to_representation(self, instance):
+        # Avoid 500 when legacy rows lack a Profile (RelatedObjectDoesNotExist on nested sources).
+        if not Profile.objects.filter(user_id=instance.pk).exists():
+            Profile.objects.get_or_create(user=instance)
+        return super().to_representation(instance)
+
 
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, min_length=8, style={'input_type': 'password'})
@@ -106,12 +113,17 @@ class RegisterSerializer(serializers.ModelSerializer):
             'bio': validated_data.pop('bio', ''),
         }
         profile_data = {key: value for key, value in profile_data.items() if value}
-        user = create_user_with_profile(
-            email=validated_data['email'],
-            password=password,
-            username=validated_data.get('username'),
-            profile_data=profile_data,
-        )
+        try:
+            user = create_user_with_profile(
+                email=validated_data['email'],
+                password=password,
+                username=validated_data.get('username'),
+                profile_data=profile_data,
+            )
+        except IntegrityError as exc:
+            raise serializers.ValidationError(
+                {'email': 'A user with this email or username already exists.'}
+            ) from exc
         return user
 
     def to_representation(self, instance):
@@ -119,6 +131,9 @@ class RegisterSerializer(serializers.ModelSerializer):
 
 
 class EmailTokenObtainPairSerializer(TokenObtainPairSerializer):
+    # CustomUser.USERNAME_FIELD is ``email``; accept ``email`` in JSON (not ``username``).
+    username_field = User.USERNAME_FIELD
+
     def validate(self, attrs):
         data = super().validate(attrs)
         data['user'] = AccountProfileSerializer(self.user, context=self.context).data

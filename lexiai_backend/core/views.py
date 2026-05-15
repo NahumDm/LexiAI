@@ -9,6 +9,20 @@ from rest_framework.views import APIView
 logger = logging.getLogger(__name__)
 
 
+def _probe_cache() -> tuple[str, str | None]:
+    try:
+        from django.core.cache import cache
+
+        key = 'lexiai.health.ping'
+        cache.set(key, '1', timeout=10)
+        if cache.get(key) != '1':
+            return 'down', 'cache set/get mismatch'
+        return 'ok', None
+    except Exception as exc:
+        logger.warning('health: cache probe failed: %s', exc)
+        return 'down', str(exc)
+
+
 def _probe_database() -> tuple[str, str | None]:
     """Round-trip ``SELECT 1`` against the default DB. Returns (status, error)."""
     try:
@@ -72,12 +86,18 @@ class HealthCheckView(APIView):
             status_label = 'degraded'
             error = error or db_error
 
+        cache_status, cache_error = _probe_cache()
+        if cache_status != 'ok':
+            status_label = 'degraded'
+            error = error or cache_error
+
         body = {
             'status': status_label,
             'service': 'LexiAI',
             'llm': llm_kind,
             'embeddings_loaded': embeddings_loaded,
             'database': database_status,
+            'cache': cache_status,
         }
         if error is not None:
             body['error'] = error
