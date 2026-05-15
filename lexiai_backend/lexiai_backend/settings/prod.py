@@ -51,12 +51,27 @@ if _db_scheme not in {'postgres', 'postgresql'}:
         'Fix the value or the Railway variable reference.'
     )
 
-redis_url = _require_env(
-    'REDIS_URL',
-    'Add Redis (plugin or Redis service), then copy or reference REDIS_URL on this service. '
-    'Required for Celery broker and Django cache in production.',
-)
+redis_url = _env_stripped('REDIS_URL')
+if not redis_url:
+    if _env_stripped('UPSTASH_REDIS_REST_URL'):
+        raise RuntimeError(
+            'REDIS_URL is unset but UPSTASH_REDIS_REST_URL is set. '
+            'UPSTASH_REDIS_REST_URL is the HTTP REST endpoint only - Django cache and Celery need the Redis TCP URL. '
+            'In the Upstash console open your database -> Connect / redis-cli and copy '
+            'rediss://default:PASSWORD@....upstash.io:6379 into Railway as REDIS_URL '
+            '(same on the worker service).'
+        )
+    raise RuntimeError(
+        'REDIS_URL is missing or empty. Add Redis (Upstash, Railway Redis, etc.), then set REDIS_URL on this service. '
+        'Required for Celery broker and Django cache in production.'
+    )
 _ru = redis_url.strip()
+_lower = _ru.lower()
+if _lower.startswith('https://') or _lower.startswith('http://'):
+    raise RuntimeError(
+        'REDIS_URL must not be an https:// or http:// URL (e.g. Upstash UPSTASH_REDIS_REST_URL). '
+        'Use the TLS TCP URL from Upstash -> Connect: rediss://default:PASSWORD@HOST:6379'
+    )
 # Railway / Docker sometimes paste "host:port/db" without a scheme; urlparse then yields scheme ''.
 if '://' not in _ru:
     _ru = f'redis://{_ru.lstrip("/")}'
