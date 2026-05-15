@@ -26,7 +26,7 @@ services:
   web:
     build:
       context: ..
-      dockerfile: lexiai_backend/Dockerfile
+      dockerfile: Dockerfile
     working_dir: /app/lexiai_backend
     command: >
       sh -c "python manage.py migrate --noinput &&
@@ -54,7 +54,7 @@ services:
   worker:
     build:
       context: ..
-      dockerfile: lexiai_backend/Dockerfile
+      dockerfile: Dockerfile
     working_dir: /app/lexiai_backend
     command: celery -A lexiai_backend worker --loglevel=info --concurrency=2
     env_file:
@@ -83,7 +83,7 @@ services:
   beat:
     build:
       context: ..
-      dockerfile: lexiai_backend/Dockerfile
+      dockerfile: Dockerfile
     working_dir: /app/lexiai_backend
     command: celery -A lexiai_backend.celery beat -l info
     env_file:
