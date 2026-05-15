@@ -56,12 +56,29 @@ redis_url = _require_env(
     'Add Redis (plugin or Redis service), then copy or reference REDIS_URL on this service. '
     'Required for Celery broker and Django cache in production.',
 )
+_ru = redis_url.strip()
+# Railway / Docker sometimes paste "host:port/db" without a scheme; urlparse then yields scheme ''.
+if '://' not in _ru:
+    _ru = f'redis://{_ru.lstrip("/")}'
+redis_url = _ru
 _redis_scheme = urlparse(redis_url).scheme
 if _redis_scheme not in {'redis', 'rediss'}:
     raise RuntimeError(
-        f'REDIS_URL must use redis or rediss (got {_redis_scheme!r}). '
-        'Fix the connection string.'
+        f'REDIS_URL must use redis or rediss (parsed scheme {_redis_scheme!r}). '
+        'Set a full URL from your Redis provider (e.g. redis://… or rediss://… on TLS). '
+        'Bare host:port values are auto-prefixed with redis://.'
     )
+
+# `base` read REDIS_URL before normalization; align cache + Celery with the canonical URL.
+REDIS_URL = redis_url
+CACHES['default'] = {
+    'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+    'LOCATION': REDIS_URL,
+}
+_celery_broker = _env_stripped('CELERY_BROKER_URL')
+_celery_result = _env_stripped('CELERY_RESULT_BACKEND')
+CELERY_BROKER_URL = _celery_broker or REDIS_URL
+CELERY_RESULT_BACKEND = _celery_result or CELERY_BROKER_URL
 
 # Default `*` when unset so deploy works before the public hostname / frontend URL is known.
 # Set explicit comma-separated hosts in Railway Variables before exposing real traffic.
