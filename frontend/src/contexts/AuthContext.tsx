@@ -18,11 +18,9 @@
  *
  * ROLE / ROUTE SEPARATION
  * ────────────────────────────────────────────────────────────────
- * User vs admin (Django `is_staff` / `is_superuser`) surfaces are kept
- * disjoint by `getNavigationRedirect` + `RouteMiddleware` (see
- * `src/lib/routeAuth.ts`). Staff accounts must use `/admin/login`, not
- * `/login` — `handleLogin` still rejects staff on the user form so tokens
- * never land in the user app from that path.
+ * User JWT (`lexiai.user.*`) and admin JWT (`lexiai.admin.*`) are stored
+ * separately. A normal user session must not unlock `/admin/*`; only
+ * `isAdminAuthenticated` (admin storage + staff flags) does.
  */
 
 'use client';
@@ -37,7 +35,7 @@ import React, {
   ReactNode,
 } from 'react';
 import { AuthAPI, type User } from '@/lib/api/auth';
-import { apiClient, formatApiErrorMessage } from '@/lib/api/client';
+import { apiClient, formatApiErrorMessage, type AuthScope } from '@/lib/api/client';
 import { useLocation, useNavigate } from 'react-router-dom';
 
 const GUEST_QUERY_LIMIT = 3;
@@ -59,19 +57,16 @@ export interface AuthContextType {
   isLoading: boolean;
   isAuthenticated: boolean;
   isGuest: boolean;
-  /**
-   * True iff the logged-in user has Django staff/superuser privileges.
-   * Sourced from the backend's user payload (`is_staff || is_superuser`),
-   * NOT from the custom `role` field. This is the SAME signal Django uses
-   * to gate access to `/admin/`, so the SPA and Django admin agree on who
-   * is "admin".
-   *
-   * `isAdminUser` is an alias kept for naming alignment with the
-   * session-isolation spec (`isAdminUser = user?.is_staff || user?.is_superuser`).
-   * Always equal to `isAdmin`.
-   */
+  /** True when a valid admin-scoped JWT session exists (staff/superuser). */
+  isAdminAuthenticated: boolean;
+  /** Admin profile from `lexiai.admin.*` storage (null if not admin-signed-in). */
+  adminUser: User | null;
+  /** @deprecated Use `isAdminAuthenticated` — kept for existing imports. */
   isAdmin: boolean;
+  /** @deprecated Alias of `isAdminAuthenticated`. */
   isAdminUser: boolean;
+  refreshAdminUser: () => Promise<void>;
+  adminLogout: () => Promise<void>;
   guestQueriesRemaining: number;
   error: string | null;
   login: (email: string, password: string) => Promise<void>;
@@ -105,12 +100,15 @@ const readGuestRemaining = (): number => {
 // Synchronous initial state — runs once, during useState initialization,
 // before any effect or render commits. This is what prevents the
 // "logged-in user sees login screen on reload" flicker.
-const hydrateInitialUser = (): User | null => {
-  return apiClient.getStoredUser<User>();
-};
+const hydrateInitialUser = (): User | null => apiClient.getStoredUser<User>('user');
+const hydrateInitialAdmin = (): User | null => apiClient.getStoredUser<User>('admin');
+
+const isStaffUser = (u: User | null): boolean =>
+  !!u && !!(u.is_staff || u.is_superuser);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(() => hydrateInitialUser());
+  const [adminUser, setAdminUser] = useState<User | null>(() => hydrateInitialAdmin());
   const [isGuest, setIsGuest] = useState<boolean>(() => readGuestFlag());
   const [guestQueriesRemaining, setGuestQueriesRemaining] = useState<number>(() =>
     readGuestRemaining()
@@ -134,24 +132,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false;
 
-    const initAuth = async () => {
-      try {
-        if (!apiClient.hasToken()) {
-          if (apiClient.getStoredUser() !== null) apiClient.clearStoredUser();
-          if (!cancelled) setUser(null);
+    const initSession = async (scope: AuthScope, apply: (u: User | null) => void) => {
+      if (!apiClient.hasToken(scope)) {
+        if (apiClient.getStoredUser(scope) !== null) apiClient.clearStoredUser(scope);
+        if (!cancelled) apply(null);
+        return;
+      }
+      const response = await AuthAPI.getCurrentUser(scope);
+      if (cancelled) return;
+      if (response.data) {
+        if (scope === 'admin' && !isStaffUser(response.data)) {
+          apiClient.logout(scope);
+          apply(null);
           return;
         }
+        apply(response.data);
+        apiClient.setStoredUser(response.data, scope);
+      } else if (response.status === 401) {
+        apply(null);
+        apiClient.clearStoredUser(scope);
+        apiClient.logout(scope);
+      }
+    };
 
-        const response = await AuthAPI.getCurrentUser();
-        if (cancelled) return;
-
-        if (response.data) {
-          setUser(response.data);
-          apiClient.setStoredUser(response.data);
-        } else if (response.status === 401) {
-          setUser(null);
-          apiClient.clearStoredUser();
-        }
+    const initAuth = async () => {
+      try {
+        await Promise.all([
+          initSession('user', setUser),
+          initSession('admin', setAdminUser),
+        ]);
       } catch (err) {
         console.error('[auth] init error:', err);
       } finally {
@@ -169,8 +178,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // --- Stable 401 handler --------------------------------------------------
   useEffect(() => {
-    apiClient.setUnauthorizedHandler(() => {
-      // Clear all auth state.
+    apiClient.setUnauthorizedHandler((scope) => {
+      const path = locationRef.current?.pathname ?? '/';
+
+      if (scope === 'admin') {
+        setAdminUser(null);
+        apiClient.logout('admin');
+        const onAdminAuthPage = path === '/admin/login' || path.startsWith('/admin/login/');
+        if (!onAdminAuthPage && path.startsWith('/admin')) {
+          navigateRef.current('/admin/login', { replace: true, state: { from: path } });
+        }
+        return;
+      }
+
       setUser(null);
       setIsGuest(false);
       setGuestQueriesRemaining(GUEST_QUERY_LIMIT);
@@ -178,18 +198,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         safeStorage()?.removeItem(GUEST_FLAG_KEY);
         safeStorage()?.removeItem(GUEST_REMAINING_KEY);
       } catch { /* ignore */ }
-      apiClient.logout();
+      apiClient.logout('user');
 
-      const path = locationRef.current?.pathname ?? '/';
-      const isAuthPage =
+      const isUserAuthPage =
         path === '/login' ||
         path === '/register' ||
         path === '/' ||
-        path === '/admin/login' ||
-        path.startsWith('/admin/login/');
-      if (!isAuthPage) {
-        const target = path.startsWith('/admin') ? '/admin/login' : '/login';
-        navigateRef.current(target, { replace: true, state: { from: path } });
+        path === '/admin/login';
+      if (!isUserAuthPage && !path.startsWith('/admin')) {
+        navigateRef.current('/login', { replace: true, state: { from: path } });
       }
     });
 
@@ -221,12 +238,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const isStaffOrSuper = !!(userData.is_staff || userData.is_superuser);
       if (isStaffOrSuper) {
         try {
-          await AuthAPI.logout();
+          await AuthAPI.logout('user');
         } catch {
           /* best-effort blacklist — local tokens are cleared below */
         }
-        apiClient.logout();
-        apiClient.clearStoredUser();
+        apiClient.logout('user');
+        apiClient.clearStoredUser('user');
         const message =
           'Admin accounts must sign in at /admin/login. This login form is for regular users only.';
         setError(message);
@@ -240,7 +257,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         safeStorage()?.removeItem(GUEST_FLAG_KEY);
         safeStorage()?.removeItem(GUEST_REMAINING_KEY);
       } catch { /* ignore */ }
-      apiClient.setStoredUser(userData);
+      apiClient.setStoredUser(userData, 'user');
 
       navigate('/chat', { replace: true });
     } finally {
@@ -305,7 +322,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           safeStorage()?.removeItem(GUEST_FLAG_KEY);
           safeStorage()?.removeItem(GUEST_REMAINING_KEY);
         } catch { /* ignore */ }
-        apiClient.setStoredUser(userData);
+        apiClient.setStoredUser(userData, 'user');
 
         navigate('/chat', { replace: true });
       } finally {
@@ -315,16 +332,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [navigate]
   );
 
-  // --- Logout -------------------------------------------------------------
+  // --- Logout (user app only; does not clear admin session) ---------------
   const handleLogout = useCallback(async () => {
-    const wasAdmin =
-      !!user &&
-      !isGuest &&
-      !!(user.is_staff || user.is_superuser);
-
     setIsLoading(true);
     try {
-      await AuthAPI.logout();
+      await AuthAPI.logout('user');
     } catch (err) {
       console.error('[auth] logout error:', err);
     } finally {
@@ -335,23 +347,51 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         safeStorage()?.removeItem(GUEST_FLAG_KEY);
         safeStorage()?.removeItem(GUEST_REMAINING_KEY);
       } catch { /* ignore */ }
-      apiClient.logout();
+      apiClient.logout('user');
       setIsLoading(false);
-      const next = wasAdmin ? '/admin/login' : '/';
-      window.location.replace(next);
+      window.location.replace('/');
     }
-  }, [user, isGuest]);
+  }, []);
 
-  // --- Refresh user data --------------------------------------------------
+  const handleAdminLogout = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      await AuthAPI.logout('admin');
+    } catch (err) {
+      console.error('[auth] admin logout error:', err);
+    } finally {
+      setAdminUser(null);
+      apiClient.logout('admin');
+      setIsLoading(false);
+      window.location.replace('/admin/login');
+    }
+  }, []);
+
   const handleRefreshUser = useCallback(async () => {
     try {
-      const response = await AuthAPI.getCurrentUser();
+      const response = await AuthAPI.getCurrentUser('user');
       if (response.data) {
         setUser(response.data);
-        apiClient.setStoredUser(response.data);
+        apiClient.setStoredUser(response.data, 'user');
       }
     } catch (err) {
       console.error('[auth] refresh user failed:', err);
+    }
+  }, []);
+
+  const handleRefreshAdminUser = useCallback(async () => {
+    try {
+      const response = await AuthAPI.getCurrentUser('admin');
+      if (response.data && isStaffUser(response.data)) {
+        setAdminUser(response.data);
+        apiClient.setStoredUser(response.data, 'admin');
+      } else if (response.data) {
+        await AuthAPI.logout('admin');
+        setAdminUser(null);
+        apiClient.logout('admin');
+      }
+    } catch (err) {
+      console.error('[auth] refresh admin failed:', err);
     }
   }, []);
 
@@ -373,7 +413,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setIsGuest(true);
       setGuestQueriesRemaining(GUEST_QUERY_LIMIT);
 
-      apiClient.setStoredUser(userData);
+      apiClient.setStoredUser(userData, 'user');
       try {
         safeStorage()?.setItem(GUEST_FLAG_KEY, 'true');
         safeStorage()?.setItem(GUEST_REMAINING_KEY, String(GUEST_QUERY_LIMIT));
@@ -394,15 +434,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
   }, [isGuest]);
 
-  // Drive admin UI gating off Django's canonical staff/superuser flags.
-  // Guests never have these; even if a guest payload accidentally carried
-  // is_staff, the explicit `!isGuest` guards against it. Computed once
-  // so both `isAdmin` and the spec-aligned alias `isAdminUser` stay in
-  // sync without two boolean expressions to keep aligned.
-  const isAdmin = !!user && !isGuest && !!(user.is_staff || user.is_superuser);
+  const isAdminAuthenticated = isStaffUser(adminUser);
 
   const value: AuthContextType = {
     user,
+    adminUser,
     isLoading,
     // Preserve original semantic: guests carry a JWT for API calls but are
     // NOT "authenticated" in the UI sense — they cannot access protected
@@ -410,14 +446,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     //   if (!isAuthenticated && !(allowGuest && isGuest)) redirect
     isAuthenticated: !!user && !isGuest,
     isGuest,
-    isAdmin,
-    isAdminUser: isAdmin,
+    isAdminAuthenticated,
+    isAdmin: isAdminAuthenticated,
+    isAdminUser: isAdminAuthenticated,
     guestQueriesRemaining,
     error,
     login: handleLogin,
     register: handleRegister,
     logout: handleLogout,
+    adminLogout: handleAdminLogout,
     refreshUser: handleRefreshUser,
+    refreshAdminUser: handleRefreshAdminUser,
     continueAsGuest: handleContinueAsGuest,
     consumeGuestQuery: handleConsumeGuestQuery,
   };

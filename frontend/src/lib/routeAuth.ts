@@ -1,13 +1,17 @@
 /**
  * Pure redirects for `RouteMiddleware`. Rules match `UserRoute` / `AdminRoute`
  * in `src/components/routing/ProtectedRoute.tsx` (guest allowed on `/chat`).
+ *
+ * User and admin JWT sessions use separate storage keys; redirects must not
+ * treat a user-session as admin access or vice versa.
  */
 
 export interface SessionSnapshot {
+  /** Signed-in user app session (non-guest). */
   isAuthenticated: boolean;
   isGuest: boolean;
-  /** Django staff/superuser, non-guest (same as AuthContext.isAdmin). */
-  isAdmin: boolean;
+  /** Admin SPA session (`lexiai.admin.*` tokens + staff profile). */
+  isAdminAuthenticated: boolean;
 }
 
 const ADMIN_LOGIN = '/admin/login';
@@ -41,46 +45,41 @@ export function getNavigationRedirect(
   }
 
   if (path === ADMIN_LOGIN) {
-    if (snap.isAdmin) return '/admin';
-    if (snap.isAuthenticated || snap.isGuest) return '/';
+    if (snap.isAdminAuthenticated) return '/admin';
     return null;
   }
 
   if (path.startsWith('/admin')) {
-    if (!snap.isAdmin) {
-      if (snap.isAuthenticated || snap.isGuest) return '/';
+    if (!snap.isAdminAuthenticated) {
       return ADMIN_LOGIN;
     }
     return null;
   }
 
-  if (path === '/login') {
+  if (path === '/login' || path === '/register') {
+    if (snap.isAdminAuthenticated) return '/admin';
     if (!snap.isAuthenticated && !snap.isGuest) return null;
     if (snap.isGuest) return CHAT_PREFIX;
-    if (snap.isAdmin) return '/admin';
-    return CHAT_PREFIX;
-  }
-
-  if (path === '/register') {
-    if (!snap.isAuthenticated && !snap.isGuest) return null;
-    if (snap.isGuest) return CHAT_PREFIX;
-    if (snap.isAdmin) return '/admin';
     return CHAT_PREFIX;
   }
 
   if (isChatPath(path)) {
     if (!snap.isAuthenticated && !snap.isGuest) return '/login';
-    if (snap.isAdmin) return '/admin';
+    if (snap.isAdminAuthenticated && !snap.isAuthenticated && !snap.isGuest) {
+      return '/login';
+    }
     return null;
   }
 
   if (path === '/') {
-    if (snap.isAdmin) return '/admin';
+    if (snap.isAdminAuthenticated) return '/admin';
     return null;
   }
 
   if (path === '/account' || path.startsWith('/account/')) {
-    if (snap.isAdmin) return '/admin';
+    if (snap.isAdminAuthenticated && !snap.isAuthenticated && !snap.isGuest) {
+      return '/login';
+    }
     if (!snap.isAuthenticated && !snap.isGuest) return '/login';
     return null;
   }

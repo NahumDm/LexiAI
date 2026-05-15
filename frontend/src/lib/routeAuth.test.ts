@@ -4,22 +4,27 @@ import { getNavigationRedirect, type SessionSnapshot } from './routeAuth';
 const guest: SessionSnapshot = {
   isAuthenticated: false,
   isGuest: true,
-  isAdmin: false,
+  isAdminAuthenticated: false,
 };
 const user: SessionSnapshot = {
   isAuthenticated: true,
   isGuest: false,
-  isAdmin: false,
+  isAdminAuthenticated: false,
 };
-const admin: SessionSnapshot = {
+const adminOnly: SessionSnapshot = {
+  isAuthenticated: false,
+  isGuest: false,
+  isAdminAuthenticated: true,
+};
+const userAndAdmin: SessionSnapshot = {
   isAuthenticated: true,
   isGuest: false,
-  isAdmin: true,
+  isAdminAuthenticated: true,
 };
 const anon: SessionSnapshot = {
   isAuthenticated: false,
   isGuest: false,
-  isAdmin: false,
+  isAdminAuthenticated: false,
 };
 
 describe('getNavigationRedirect', () => {
@@ -27,37 +32,40 @@ describe('getNavigationRedirect', () => {
     expect(getNavigationRedirect('/admin-login', anon)).toBe('/admin/login');
   });
 
-  it('admin login: admin goes to dashboard; others to home', () => {
-    expect(getNavigationRedirect('/admin/login', admin)).toBe('/admin');
-    expect(getNavigationRedirect('/admin/login', user)).toBe('/');
-    expect(getNavigationRedirect('/admin/login', guest)).toBe('/');
+  it('admin login: only admin session redirects; user session may stay on form', () => {
+    expect(getNavigationRedirect('/admin/login', adminOnly)).toBe('/admin');
+    expect(getNavigationRedirect('/admin/login', userAndAdmin)).toBe('/admin');
+    expect(getNavigationRedirect('/admin/login', user)).toBe(null);
+    expect(getNavigationRedirect('/admin/login', guest)).toBe(null);
     expect(getNavigationRedirect('/admin/login', anon)).toBe(null);
   });
 
-  it('admin area: unauthenticated to login; non-admin with session to /', () => {
+  it('admin area: requires admin session only', () => {
     expect(getNavigationRedirect('/admin', anon)).toBe('/admin/login');
-    expect(getNavigationRedirect('/admin/documents', anon)).toBe('/admin/login');
-    expect(getNavigationRedirect('/admin', user)).toBe('/');
-    expect(getNavigationRedirect('/admin', guest)).toBe('/');
-    expect(getNavigationRedirect('/admin', admin)).toBe(null);
+    expect(getNavigationRedirect('/admin/documents', user)).toBe('/admin/login');
+    expect(getNavigationRedirect('/admin', guest)).toBe('/admin/login');
+    expect(getNavigationRedirect('/admin', adminOnly)).toBe(null);
+    expect(getNavigationRedirect('/admin', userAndAdmin)).toBe(null);
   });
 
-  it('user login: redirects by role', () => {
+  it('user login: user goes to chat; admin session to admin app', () => {
     expect(getNavigationRedirect('/login', anon)).toBe(null);
     expect(getNavigationRedirect('/login', guest)).toBe('/chat');
     expect(getNavigationRedirect('/login', user)).toBe('/chat');
-    expect(getNavigationRedirect('/login', admin)).toBe('/admin');
+    expect(getNavigationRedirect('/login', adminOnly)).toBe('/admin');
   });
 
-  it('chat: requires session; admin sent to admin app', () => {
+  it('chat: user or guest allowed; not admin-only session', () => {
     expect(getNavigationRedirect('/chat', anon)).toBe('/login');
     expect(getNavigationRedirect('/chat', user)).toBe(null);
     expect(getNavigationRedirect('/chat', guest)).toBe(null);
-    expect(getNavigationRedirect('/chat', admin)).toBe('/admin');
+    expect(getNavigationRedirect('/chat', adminOnly)).toBe('/login');
+    expect(getNavigationRedirect('/chat', userAndAdmin)).toBe(null);
   });
 
-  it('landing: admin cannot stay on /', () => {
+  it('landing: admin session goes to admin dashboard', () => {
     expect(getNavigationRedirect('/', anon)).toBe(null);
-    expect(getNavigationRedirect('/', admin)).toBe('/admin');
+    expect(getNavigationRedirect('/', adminOnly)).toBe('/admin');
+    expect(getNavigationRedirect('/', user)).toBe(null);
   });
 });

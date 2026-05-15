@@ -13,6 +13,14 @@
  *   logout + "Authentication failed. Please log in again." error.
  */
 
+import {
+  AUTH_STORAGE_KEYS,
+  LEGACY_AUTH_KEYS,
+  type AuthScope,
+} from './authScope';
+
+export type { AuthScope };
+
 export interface ApiResponse<T = unknown> {
   data?: T;
   error?: string;
@@ -25,12 +33,8 @@ export interface ApiError extends Error {
   response?: unknown;
 }
 
-const ACCESS_TOKEN_KEY = 'lexiai.access_token';
-const REFRESH_TOKEN_KEY = 'lexiai.refresh_token';
-const USER_KEY = 'lexiai.user';
-
-// Legacy keys (sessionStorage) — migrated on first read so existing tabs don't break.
-const LEGACY_KEYS = ['access_token', 'refresh_token', 'user'] as const;
+// Legacy sessionStorage keys — migrated into user scope on first read.
+const LEGACY_SESSION_KEYS = ['access_token', 'refresh_token', 'user'] as const;
 
 // Endpoints whose 401 must NOT trigger refresh/handleAuthError. These are
 // PUBLIC auth endpoints; a 401 there means "bad credentials", not "expired token".
@@ -89,9 +93,24 @@ const DEBUG_AUTH = (() => {
   }
 })();
 
+/** Verbose API URL logging (browser console): set VITE_DEBUG_API=true on Vercel and redeploy. */
+const DEBUG_API = (() => {
+  try {
+    return DEBUG_AUTH || import.meta.env.VITE_DEBUG_API === 'true';
+  } catch {
+    return false;
+  }
+})();
+
 const debugLog = (...args: unknown[]) => {
   if (DEBUG_AUTH) {
     console.debug('[auth]', ...args);
+  }
+};
+
+const debugApiLog = (...args: unknown[]) => {
+  if (DEBUG_API) {
+    console.info('[lexiai-api]', ...args);
   }
 };
 
@@ -104,7 +123,8 @@ class ApiClient {
   private isRefreshing = false;
   private refreshPromise: Promise<boolean> | null = null;
   private isHandlingUnauthorized = false;
-  private onUnauthorized: (() => void) | null = null;
+  private onUnauthorized: ((scope: AuthScope) => void) | null = null;
+  private hasLoggedApiBootstrap = false;
 
   constructor() {
     const envBase = import.meta.env.VITE_API_BASE_URL as string | undefined;
@@ -149,10 +169,28 @@ class ApiClient {
     try {
       const storage = this.safeStorage();
       if (!storage) return;
-      for (const legacy of LEGACY_KEYS) {
+
+      const userKeys = AUTH_STORAGE_KEYS.user;
+      const pairs: [string, string][] = [
+        [LEGACY_AUTH_KEYS.access, userKeys.access],
+        [LEGACY_AUTH_KEYS.refresh, userKeys.refresh],
+        [LEGACY_AUTH_KEYS.profile, userKeys.profile],
+      ];
+      for (const [legacyKey, newKey] of pairs) {
+        const legacyValue = storage.getItem(legacyKey);
+        if (legacyValue && !storage.getItem(newKey)) {
+          storage.setItem(newKey, legacyValue);
+        }
+        storage.removeItem(legacyKey);
+      }
+
+      for (const legacy of LEGACY_SESSION_KEYS) {
         const newKey =
-          legacy === 'access_token' ? ACCESS_TOKEN_KEY :
-          legacy === 'refresh_token' ? REFRESH_TOKEN_KEY : USER_KEY;
+          legacy === 'access_token'
+            ? userKeys.access
+            : legacy === 'refresh_token'
+              ? userKeys.refresh
+              : userKeys.profile;
         const sessionValue = window.sessionStorage?.getItem(legacy);
         if (sessionValue && !storage.getItem(newKey)) {
           storage.setItem(newKey, sessionValue);
@@ -164,91 +202,107 @@ class ApiClient {
     }
   }
 
-  getToken(): string | null {
+  private keys(scope: AuthScope) {
+    return AUTH_STORAGE_KEYS[scope];
+  }
+
+  getToken(scope: AuthScope = 'user'): string | null {
     try {
-      return this.safeStorage()?.getItem(ACCESS_TOKEN_KEY) ?? null;
+      return this.safeStorage()?.getItem(this.keys(scope).access) ?? null;
     } catch {
       return null;
     }
   }
 
-  private setToken(token: string): void {
+  private setToken(token: string, scope: AuthScope): void {
     try {
-      this.safeStorage()?.setItem(ACCESS_TOKEN_KEY, token);
+      this.safeStorage()?.setItem(this.keys(scope).access, token);
     } catch (e) {
-      console.error('[auth] Failed to persist access token:', e);
+      console.error(`[auth] Failed to persist ${scope} access token:`, e);
     }
   }
 
-  getRefreshToken(): string | null {
+  getRefreshToken(scope: AuthScope = 'user'): string | null {
     try {
-      return this.safeStorage()?.getItem(REFRESH_TOKEN_KEY) ?? null;
+      return this.safeStorage()?.getItem(this.keys(scope).refresh) ?? null;
     } catch {
       return null;
     }
   }
 
-  private setRefreshToken(token: string): void {
+  private setRefreshToken(token: string, scope: AuthScope): void {
     try {
-      this.safeStorage()?.setItem(REFRESH_TOKEN_KEY, token);
+      this.safeStorage()?.setItem(this.keys(scope).refresh, token);
     } catch (e) {
-      console.error('[auth] Failed to persist refresh token:', e);
+      console.error(`[auth] Failed to persist ${scope} refresh token:`, e);
     }
   }
 
-  getStoredUser<T = unknown>(): T | null {
+  getStoredUser<T = unknown>(scope: AuthScope = 'user'): T | null {
     try {
-      const raw = this.safeStorage()?.getItem(USER_KEY);
+      const raw = this.safeStorage()?.getItem(this.keys(scope).profile);
       if (!raw) return null;
       return JSON.parse(raw) as T;
     } catch {
-      try { this.safeStorage()?.removeItem(USER_KEY); } catch { /* ignore */ }
+      try {
+        this.safeStorage()?.removeItem(this.keys(scope).profile);
+      } catch {
+        /* ignore */
+      }
       return null;
     }
   }
 
-  setStoredUser(user: unknown): void {
+  setStoredUser(user: unknown, scope: AuthScope = 'user'): void {
     try {
-      this.safeStorage()?.setItem(USER_KEY, JSON.stringify(user));
+      this.safeStorage()?.setItem(this.keys(scope).profile, JSON.stringify(user));
     } catch (e) {
-      console.error('[auth] Failed to persist user:', e);
+      console.error(`[auth] Failed to persist ${scope} profile:`, e);
     }
   }
 
-  clearStoredUser(): void {
-    try { this.safeStorage()?.removeItem(USER_KEY); } catch { /* ignore */ }
+  clearStoredUser(scope: AuthScope = 'user'): void {
+    try {
+      this.safeStorage()?.removeItem(this.keys(scope).profile);
+    } catch {
+      /* ignore */
+    }
   }
 
-  private clearTokens(): void {
+  private clearTokens(scope: AuthScope): void {
     try {
       const storage = this.safeStorage();
-      storage?.removeItem(ACCESS_TOKEN_KEY);
-      storage?.removeItem(REFRESH_TOKEN_KEY);
-      storage?.removeItem(USER_KEY);
+      const k = this.keys(scope);
+      storage?.removeItem(k.access);
+      storage?.removeItem(k.refresh);
+      storage?.removeItem(k.profile);
     } catch (e) {
-      console.error('[auth] Failed to clear tokens:', e);
+      console.error(`[auth] Failed to clear ${scope} tokens:`, e);
     }
   }
 
-  hasToken(): boolean {
-    return this.getToken() !== null;
+  hasToken(scope: AuthScope = 'user'): boolean {
+    return this.getToken(scope) !== null;
   }
 
-  setAuthTokens(accessToken: string, refreshToken?: string): void {
-    this.setToken(accessToken);
+  setAuthTokens(accessToken: string, refreshToken: string | undefined, scope: AuthScope): void {
+    this.setToken(accessToken, scope);
     if (refreshToken) {
-      this.setRefreshToken(refreshToken);
+      this.setRefreshToken(refreshToken, scope);
     }
-    debugLog('tokens persisted', { access: redact(accessToken), refresh: redact(refreshToken ?? null) });
+    debugLog(`${scope} tokens persisted`, {
+      access: redact(accessToken),
+      refresh: redact(refreshToken ?? null),
+    });
   }
 
-  logout(): void {
-    this.clearTokens();
+  logout(scope: AuthScope = 'user'): void {
+    this.clearTokens(scope);
   }
 
   // --- Refresh -------------------------------------------------------------
 
-  private async refreshAccessToken(): Promise<boolean> {
+  private async refreshAccessToken(scope: AuthScope): Promise<boolean> {
     if (this.isRefreshing && this.refreshPromise) {
       return this.refreshPromise;
     }
@@ -256,10 +310,10 @@ class ApiClient {
     this.isRefreshing = true;
     this.refreshPromise = (async () => {
       try {
-        const refreshToken = this.getRefreshToken();
+        const refreshToken = this.getRefreshToken(scope);
         if (!refreshToken) {
-          debugLog('refresh skipped: no refresh token in storage');
-          this.clearTokens();
+          debugLog('refresh skipped: no refresh token in storage', { scope });
+          this.clearTokens(scope);
           return false;
         }
 
@@ -272,29 +326,27 @@ class ApiClient {
         });
 
         if (!response.ok) {
-          debugLog('refresh failed', { status: response.status });
-          this.clearTokens();
+          debugLog('refresh failed', { status: response.status, scope });
+          this.clearTokens(scope);
           return false;
         }
 
         const data = await response.json();
         if (!data?.access) {
           debugLog('refresh response missing access token', data);
-          this.clearTokens();
+          this.clearTokens(scope);
           return false;
         }
 
-        this.setToken(data.access);
-        // Backend has ROTATE_REFRESH_TOKENS=True + BLACKLIST_AFTER_ROTATION=True,
-        // so we MUST persist the new refresh token if returned.
+        this.setToken(data.access, scope);
         if (data.refresh) {
-          this.setRefreshToken(data.refresh);
+          this.setRefreshToken(data.refresh, scope);
         }
-        debugLog('refresh succeeded', { access: redact(data.access) });
+        debugLog('refresh succeeded', { access: redact(data.access), scope });
         return true;
       } catch (error) {
         console.error('[auth] Token refresh threw:', error);
-        this.clearTokens();
+        this.clearTokens(scope);
         return false;
       } finally {
         this.isRefreshing = false;
@@ -307,7 +359,7 @@ class ApiClient {
 
   // --- Request ------------------------------------------------------------
 
-  private buildHeaders(options: RequestInit = {}): Record<string, string> {
+  private buildHeaders(options: RequestInit = {}, scope: AuthScope = 'user'): Record<string, string> {
     // Don't auto-set Content-Type for FormData — browser must add the boundary.
     const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
 
@@ -317,7 +369,7 @@ class ApiClient {
       ...(options.headers as Record<string, string> | undefined),
     };
 
-    const token = this.getToken();
+    const token = this.getToken(scope);
     if (token && !headers['Authorization']) {
       headers['Authorization'] = `Bearer ${token}`;
     }
@@ -330,7 +382,8 @@ class ApiClient {
     options: RequestInit = {},
     retryCount = 0,
     maxRetries = 1,
-    allowHostFallback = true
+    allowHostFallback = true,
+    scope: AuthScope = 'user'
   ): Promise<ApiResponse<T>> {
     const isAuthCall = isAuthEndpoint(endpoint);
 
@@ -338,10 +391,27 @@ class ApiClient {
       const prefix = this.baseUrl ? `${this.baseUrl}/api/` : `/api/`;
       const url = endpoint.startsWith('http') ? endpoint : `${prefix}${this.apiVersion}${endpoint}`;
 
-      const headers = this.buildHeaders(options);
+      if (!this.hasLoggedApiBootstrap) {
+        this.hasLoggedApiBootstrap = true;
+        const envRaw = import.meta.env.VITE_API_BASE_URL as string | undefined;
+        const origin = typeof window !== 'undefined' ? window.location.origin : '(ssr)';
+        console.info('[LexiAI API]', {
+          VITE_API_BASE_URL: envRaw && envRaw.trim() ? envRaw.trim() : '(unset)',
+          resolvedRelativePrefix: `${prefix}${this.apiVersion}`,
+          effectiveHostForRequests: this.baseUrl || origin,
+          note:
+            envRaw && envRaw.trim()
+              ? 'Requests go to VITE_API_BASE_URL + /api/v1/…'
+              : 'Without VITE_API_BASE_URL, requests use the SAME ORIGIN as this page + /api/v1/… (Vercel static has no Django — set VITE_API_BASE_URL to your Railway API and rebuild).',
+        });
+      }
+
+      const headers = this.buildHeaders(options, scope);
       debugLog('→', options.method || 'GET', url, {
         hasAuthHeader: Boolean(headers['Authorization']),
+        scope,
       });
+      debugApiLog(options.method || 'GET', url);
 
       const response = await fetch(url, {
         ...options,
@@ -354,58 +424,80 @@ class ApiClient {
       // Handle 401 — ONLY for protected endpoints. Auth endpoints return 401 for
       // "bad credentials" and must bubble up as a normal error.
       if (response.status === 401 && !isAuthCall && retryCount < maxRetries) {
-        const refreshed = await this.refreshAccessToken();
+        const refreshed = await this.refreshAccessToken(scope);
         if (refreshed) {
-          return this.request<T>(endpoint, options, retryCount + 1, maxRetries, allowHostFallback);
+          return this.request<T>(
+            endpoint,
+            options,
+            retryCount + 1,
+            maxRetries,
+            allowHostFallback,
+            scope
+          );
         }
-        // Refresh failed — clear creds and notify AuthContext.
-        this.clearTokens();
-        this.handleAuthError();
+        this.clearTokens(scope);
+        this.handleAuthError(scope);
         return {
           status: 401,
           error: 'Authentication failed. Please log in again.',
         };
       }
 
-      // 403 — authenticated but forbidden.
-      if (response.status === 403) {
-        let detail: string | undefined;
-        try {
-          const ct = response.headers.get('content-type');
-          if (ct?.includes('application/json')) {
-            const body = await response.json();
-            detail = typeof body?.detail === 'string' ? body.detail : undefined;
+      const contentType = (response.headers.get('content-type') || '').toLowerCase();
+      const rawBody = await response.text();
+      let data: unknown = null;
+      if (rawBody) {
+        if (contentType.includes('application/json')) {
+          try {
+            data = JSON.parse(rawBody) as unknown;
+          } catch {
+            data = { _nonJsonBody: rawBody.slice(0, 400) };
           }
-        } catch { /* ignore */ }
+        } else {
+          data = rawBody;
+        }
+      }
+
+      if (response.status === 403) {
+        const detail =
+          formatApiErrorMessage(data) ||
+          (typeof data === 'object' &&
+          data &&
+          typeof (data as { detail?: unknown }).detail === 'string'
+            ? String((data as { detail: string }).detail)
+            : undefined);
         return {
           status: 403,
           error: detail || 'You do not have permission to access this resource.',
         };
       }
 
-      const contentType = response.headers.get('content-type');
-      let data: unknown = null;
-      if (contentType?.includes('application/json')) {
-        try {
-          data = await response.json();
-        } catch {
-          data = null;
-        }
-      } else if (response.ok) {
-        try { data = await response.text(); } catch { data = null; }
-      }
-
       if (!response.ok) {
-        const errObj = (data && typeof data === 'object' ? data : {}) as Record<string, unknown>;
+        const errObj = (data && typeof data === 'object' && !Array.isArray(data) ? data : {}) as Record<
+          string,
+          unknown
+        >;
         const flattened = formatApiErrorMessage(data);
+        const textSnippet =
+          typeof data === 'string'
+            ? data.replace(/\s+/g, ' ').trim().slice(0, 200)
+            : typeof errObj._nonJsonBody === 'string'
+              ? String(errObj._nonJsonBody).replace(/\s+/g, ' ').trim().slice(0, 200)
+              : '';
+        const hintMissingApi =
+          response.status === 404 && !this.baseUrl && !import.meta.env.DEV
+            ? ' This often means VITE_API_BASE_URL was not set at build time, so the browser called /api/… on the Vercel host (no API there). Set VITE_API_BASE_URL to your backend origin (e.g. https://xxx.up.railway.app) and redeploy the frontend.'
+            : '';
+
         const fallback =
           flattened ||
           (typeof errObj.error === 'string' ? errObj.error : '') ||
           (typeof errObj.message === 'string' ? errObj.message : '') ||
-          'Request failed';
+          (textSnippet ? `HTTP ${response.status}: ${textSnippet}` : '') ||
+          `Request failed (HTTP ${response.status})`;
         return {
           status: response.status,
-          error: fallback,
+          error: `${fallback}${hintMissingApi}`,
           data: data as T,
         };
       }
@@ -424,7 +516,7 @@ class ApiClient {
         if (alt && alt !== originalBaseUrl) {
           this.baseUrl = alt;
           try {
-            return await this.request<T>(endpoint, options, retryCount, maxRetries, false);
+            return await this.request<T>(endpoint, options, retryCount, maxRetries, false, scope);
           } finally {
             this.baseUrl = originalBaseUrl;
           }
@@ -437,11 +529,23 @@ class ApiClient {
         (error instanceof TypeError && msg.includes('fetch')) ||
         msg.includes('failed to fetch') ||
         msg.includes('networkerror');
-      const target = this.baseUrl || '(Vite proxy → Django port from vite.config, default 18000 for Docker)';
+      const target = this.baseUrl || '(Vite proxy → Django)';
+      const devHint =
+        isNetworkFailure && import.meta.env.DEV
+          ? ' Start Django (Docker: compose web / vite proxy) or match VITE_DJANGO_PROXY_PORT.'
+          : '';
+      const corsHint =
+        isNetworkFailure && this.baseUrl && !import.meta.env.DEV
+          ? ' If the browser console shows a CORS error, add this exact frontend origin to Railway CORS_ALLOWED_ORIGINS (no trailing slash), e.g. https://lexiai-one.vercel.app'
+          : '';
+      const missingBaseHint =
+        isNetworkFailure && !this.baseUrl && !import.meta.env.DEV
+          ? ' Set VITE_API_BASE_URL to your API origin on Vercel and redeploy. If the API is reachable, a CORS block also shows as "Failed to fetch" — fix CORS on the backend.'
+          : '';
       return {
         status: 0,
         error: isNetworkFailure
-          ? `Unable to reach API (${target}). Start Django (Docker: compose web on WEB_HOST_PORT, default 18000; or runserver). If dev uses Vite proxy, set VITE_DJANGO_PROXY_PORT to match.`
+          ? `Unable to reach API (${target}).${devHint}${corsHint}${missingBaseHint}`
           : error instanceof Error
             ? error.message
             : 'Network error',
@@ -449,38 +553,71 @@ class ApiClient {
     }
   }
 
-  async get<T>(endpoint: string): Promise<ApiResponse<T>> {
-    return this.request<T>(endpoint, { method: 'GET' });
+  async get<T>(endpoint: string, scope: AuthScope = 'user'): Promise<ApiResponse<T>> {
+    return this.request<T>(endpoint, { method: 'GET' }, 0, 1, true, scope);
   }
 
-  async post<T>(endpoint: string, body?: unknown): Promise<ApiResponse<T>> {
-    return this.request<T>(endpoint, {
-      method: 'POST',
-      body: body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
-    });
+  async post<T>(
+    endpoint: string,
+    body?: unknown,
+    scope: AuthScope = 'user'
+  ): Promise<ApiResponse<T>> {
+    return this.request<T>(
+      endpoint,
+      {
+        method: 'POST',
+        body: body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
+      },
+      0,
+      1,
+      true,
+      scope
+    );
   }
 
-  async put<T>(endpoint: string, body?: unknown): Promise<ApiResponse<T>> {
-    return this.request<T>(endpoint, {
-      method: 'PUT',
-      body: body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
-    });
+  async put<T>(
+    endpoint: string,
+    body?: unknown,
+    scope: AuthScope = 'user'
+  ): Promise<ApiResponse<T>> {
+    return this.request<T>(
+      endpoint,
+      {
+        method: 'PUT',
+        body: body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
+      },
+      0,
+      1,
+      true,
+      scope
+    );
   }
 
-  async patch<T>(endpoint: string, body?: unknown): Promise<ApiResponse<T>> {
-    return this.request<T>(endpoint, {
-      method: 'PATCH',
-      body: body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
-    });
+  async patch<T>(
+    endpoint: string,
+    body?: unknown,
+    scope: AuthScope = 'user'
+  ): Promise<ApiResponse<T>> {
+    return this.request<T>(
+      endpoint,
+      {
+        method: 'PATCH',
+        body: body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
+      },
+      0,
+      1,
+      true,
+      scope
+    );
   }
 
-  async delete<T>(endpoint: string): Promise<ApiResponse<T>> {
-    return this.request<T>(endpoint, { method: 'DELETE' });
+  async delete<T>(endpoint: string, scope: AuthScope = 'user'): Promise<ApiResponse<T>> {
+    return this.request<T>(endpoint, { method: 'DELETE' }, 0, 1, true, scope);
   }
 
   // --- Unauthorized handler ------------------------------------------------
 
-  setUnauthorizedHandler(handler: () => void): void {
+  setUnauthorizedHandler(handler: (scope: AuthScope) => void): void {
     this.onUnauthorized = handler;
   }
 
@@ -488,11 +625,11 @@ class ApiClient {
     this.onUnauthorized = null;
   }
 
-  private handleAuthError(): void {
+  private handleAuthError(scope: AuthScope): void {
     if (this.isHandlingUnauthorized) return;
     this.isHandlingUnauthorized = true;
     try {
-      this.onUnauthorized?.();
+      this.onUnauthorized?.(scope);
     } finally {
       this.isHandlingUnauthorized = false;
     }

@@ -4,11 +4,9 @@
  * Standalone form that ONLY admits Django staff / superusers into the SPA
  * admin dashboard. Intentionally isolated from the regular `/login` flow:
  *
- *  - Uses the SAME backend endpoint (`POST /api/v1/auth/login/`) and the SAME
- *    token-storage path (`AuthAPI.login` → `apiClient.setAuthTokens`), so
- *    there is no parallel auth system.
- *  - Re-fetches profile via `useAuth().refreshUser()` so AuthContext picks up
- *    the new user without us mutating its internals.
+ *  - Uses the SAME backend endpoint (`POST /api/v1/auth/login/`) but stores
+ *    tokens under `lexiai.admin.*` (separate from the user app session).
+ *  - Re-fetches profile via `useAuth().refreshAdminUser()` for the admin session.
  *  - After successful token + profile fetch, gates the navigation on
  *    `is_staff || is_superuser`. A non-admin login is REVERSED (tokens
  *    cleared, no AuthContext state retained) so a regular user typing their
@@ -36,7 +34,7 @@ const ACCESS_DENIED_MESSAGE = 'Access denied: Admin privileges required.';
 
 export default function AdminLoginPage() {
   const navigate = useNavigate();
-  const { refreshUser } = useAuth();
+  const { refreshAdminUser } = useAuth();
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -52,7 +50,7 @@ export default function AdminLoginPage() {
     try {
       // Step 1: authenticate. `AuthAPI.login` already persists tokens via
       // apiClient.setAuthTokens, identical to the regular login path.
-      const response = await AuthAPI.login({ email, password });
+      const response = await AuthAPI.login({ email, password }, 'admin');
 
       if (!response.data?.access || !response.data?.user) {
         setError(
@@ -77,20 +75,17 @@ export default function AdminLoginPage() {
         // state we don't care about here — we want to stay on this page so
         // the user can re-try with an admin account.
         try {
-          await AuthAPI.logout();
+          await AuthAPI.logout('admin');
         } catch {
           /* best-effort — tokens are still cleared below */
         }
-        apiClient.clearStoredUser();
+        apiClient.clearStoredUser('admin');
         setError(ACCESS_DENIED_MESSAGE);
         return;
       }
 
-      // Step 3: hydrate AuthContext. `refreshUser` re-fetches `/auth/profile/`
-      // using the freshly-set bearer token, which triggers AuthContext's
-      // internal `setUser` (the only sanctioned way to seed it from outside).
-      apiClient.setStoredUser(user);
-      await refreshUser();
+      apiClient.setStoredUser(user, 'admin');
+      await refreshAdminUser();
 
       navigate('/admin', { replace: true });
     } catch (err) {

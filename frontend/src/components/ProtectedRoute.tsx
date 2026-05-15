@@ -38,7 +38,7 @@ export const ProtectedRoute = ({
   allowGuest = false,
   adminRedirectTo = '/admin/login',
 }: ProtectedRouteProps) => {
-  const { isAuthenticated, isAdmin, isLoading, isGuest } = useAuth();
+  const { isAuthenticated, isAdminAuthenticated, isLoading, isGuest } = useAuth();
   const location = useLocation();
 
   if (isLoading) {
@@ -54,7 +54,7 @@ export const ProtectedRoute = ({
     return <Navigate to={target} replace state={{ from: location.pathname }} />;
   }
 
-  if (requireAdmin && !isAdmin) {
+  if (requireAdmin && !isAdminAuthenticated) {
     return <Navigate to={adminRedirectTo} replace state={{ from: location.pathname }} />;
   }
 

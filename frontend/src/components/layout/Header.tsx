@@ -19,7 +19,7 @@ interface HeaderProps {
 }
 
 export function Header({ onLoginClick, onRegisterClick, variant = 'landing' }: HeaderProps) {
-  const { user, isAuthenticated, isGuest, isAdmin, logout } = useAuth();
+  const { user, isAuthenticated, isGuest, isAdminAuthenticated, logout } = useAuth();
   const displayName = user?.name?.trim() || user?.username || user?.email || 'User';
   const avatarInitial = displayName.charAt(0).toUpperCase();
 
@@ -64,7 +64,7 @@ export function Header({ onLoginClick, onRegisterClick, variant = 'landing' }: H
                   <p className="text-xs text-muted-foreground">{user.email || 'Guest User'}</p>
                 </div>
                 <DropdownMenuSeparator />
-                {isAdmin && (
+                {isAdminAuthenticated && (
                   <>
                     <DropdownMenuItem asChild>
                       <Link to="/admin" className="cursor-pointer">

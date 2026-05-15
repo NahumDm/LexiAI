@@ -10,13 +10,13 @@ import { getNavigationRedirect } from '@/lib/routeAuth';
 export function RouteMiddleware({ children }: { children: ReactNode }) {
   const location = useLocation();
   const navigate = useNavigate();
-  const { isAuthenticated, isGuest, isAdmin, isLoading } = useAuth();
+  const { isAuthenticated, isGuest, isAdminAuthenticated, isLoading } = useAuth();
   const lastApplied = useRef<string | null>(null);
 
   useLayoutEffect(() => {
     if (isLoading) return;
 
-    const snap = { isAuthenticated, isGuest, isAdmin };
+    const snap = { isAuthenticated, isGuest, isAdminAuthenticated };
     const target = getNavigationRedirect(location.pathname, snap);
     if (!target) {
       lastApplied.current = null;
@@ -28,7 +28,7 @@ export function RouteMiddleware({ children }: { children: ReactNode }) {
     lastApplied.current = key;
     navigate(target, { replace: true });
   }, [
-    isAdmin,
+    isAdminAuthenticated,
     isAuthenticated,
     isGuest,
     isLoading,

@@ -24,7 +24,7 @@ const navItems = [
 
 export function AdminSidebar() {
   const location = useLocation();
-  const { logout } = useAuth();
+  const { adminLogout } = useAuth();
 
   const isActive = (path: string, exact = false) => {
     if (exact) return location.pathname === path;
@@ -73,7 +73,7 @@ export function AdminSidebar() {
             Back to Chat
           </Button>
         </NavLink>
-        <Button variant="sidebar" className="w-full text-destructive" onClick={logout}>
+        <Button variant="sidebar" className="w-full text-destructive" onClick={adminLogout}>
           <LogOut className="h-4 w-4 mr-3" />
           Logout
         </Button>

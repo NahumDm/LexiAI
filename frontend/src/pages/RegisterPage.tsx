@@ -18,7 +18,7 @@ import { Eye, EyeOff, Loader2, AlertCircle, CheckCircle2 } from 'lucide-react';
 
 export default function RegisterPage() {
   const navigate = useNavigate();
-  const { isAuthenticated, isGuest, isAdmin, register } = useAuth();
+  const { isAuthenticated, isGuest, isAdminAuthenticated, register } = useAuth();
 
   useEffect(() => {
     if (!isAuthenticated && !isGuest) return;
@@ -26,12 +26,12 @@ export default function RegisterPage() {
       navigate('/chat', { replace: true });
       return;
     }
-    if (isAdmin) {
+    if (isAdminAuthenticated) {
       navigate('/admin', { replace: true });
       return;
     }
     navigate('/chat', { replace: true });
-  }, [isAdmin, isAuthenticated, isGuest, navigate]);
+  }, [isAdminAuthenticated, isAuthenticated, isGuest, navigate]);
 
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');

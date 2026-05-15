@@ -3,7 +3,7 @@
  * Handles: login, register, logout, profile, token refresh
  */
 
-import { apiClient, ApiResponse, formatApiErrorMessage } from './client';
+import { apiClient, ApiResponse, formatApiErrorMessage, type AuthScope } from './client';
 
 export interface User {
   id: number;
@@ -125,15 +125,16 @@ export class AuthAPI {
    * design — see client.ts AUTH_ENDPOINT_PATTERNS). We rely on that here so
    * "wrong password" surfaces as a normal form error, not a forced logout.
    */
-  static async login(credentials: LoginRequest): Promise<ApiResponse<LoginResponse>> {
+  static async login(
+    credentials: LoginRequest,
+    scope: AuthScope = 'user'
+  ): Promise<ApiResponse<LoginResponse>> {
     const response = await apiClient.post<LoginResponse>('/auth/login/', {
       email: credentials.email,
       password: credentials.password,
     });
 
     if (!isSuccessfulAuth(response)) {
-      // Strip stale tokens just in case a prior login left them; do NOT call
-      // setAuthTokens with undefined access.
       return {
         status: response.status,
         error:
@@ -145,7 +146,7 @@ export class AuthAPI {
       };
     }
 
-    apiClient.setAuthTokens(response.data!.access, response.data!.refresh);
+    apiClient.setAuthTokens(response.data!.access, response.data!.refresh, scope);
 
     if (response.data?.user) {
       response.data.user = normalizeUser(response.data.user as unknown as BackendUser);
@@ -168,7 +169,7 @@ export class AuthAPI {
       };
     }
 
-    apiClient.setAuthTokens(response.data!.access, response.data!.refresh);
+    apiClient.setAuthTokens(response.data!.access, response.data!.refresh, 'user');
 
     if (response.data?.user) {
       response.data.user = normalizeUser(response.data.user as unknown as BackendUser);
@@ -209,8 +210,8 @@ export class AuthAPI {
   /**
    * Get current user profile
    */
-  static async getCurrentUser(): Promise<ApiResponse<User>> {
-    const response = await apiClient.get<BackendUser>('/auth/profile/');
+  static async getCurrentUser(scope: AuthScope = 'user'): Promise<ApiResponse<User>> {
+    const response = await apiClient.get<BackendUser>('/auth/profile/', scope);
     if (!response.data) {
       return response as ApiResponse<User>;
     }
@@ -250,8 +251,8 @@ export class AuthAPI {
    * otherwise it 400s. Previously we sent `{}` which silently failed and left
    * the refresh token usable for `ACCESS_TOKEN_LIFETIME` more minutes.
    */
-  static async logout(): Promise<void> {
-    const refresh = apiClient.getRefreshToken();
+  static async logout(scope: AuthScope = 'user'): Promise<void> {
+    const refresh = apiClient.getRefreshToken(scope);
     if (refresh) {
       try {
         await apiClient.post('/auth/logout/', { refresh });
@@ -260,13 +261,10 @@ export class AuthAPI {
       }
     }
 
-    apiClient.logout();
+    apiClient.logout(scope);
   }
 
-  /**
-   * Check if token is valid
-   */
-  static isAuthenticated(): boolean {
-    return apiClient.hasToken();
+  static isAuthenticated(scope: AuthScope = 'user'): boolean {
+    return apiClient.hasToken(scope);
   }
 }

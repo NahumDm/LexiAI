@@ -15,8 +15,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { apiClient, formatApiErrorMessage } from './client';
 
-const ACCESS_KEY = 'lexiai.access_token';
-const REFRESH_KEY = 'lexiai.refresh_token';
+const ACCESS_KEY = 'lexiai.user.access_token';
+const REFRESH_KEY = 'lexiai.user.refresh_token';
 
 describe('apiClient — 401 handling', () => {
   let originalFetch: typeof fetch;
@@ -115,7 +115,7 @@ describe('apiClient — 401 handling', () => {
   });
 
   it('persists access + refresh tokens via setAuthTokens', () => {
-    apiClient.setAuthTokens('access-xyz', 'refresh-xyz');
+    apiClient.setAuthTokens('access-xyz', 'refresh-xyz', 'user');
     expect(localStorage.getItem(ACCESS_KEY)).toBe('access-xyz');
     expect(localStorage.getItem(REFRESH_KEY)).toBe('refresh-xyz');
     expect(apiClient.hasToken()).toBe(true);

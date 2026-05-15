@@ -26,7 +26,9 @@
  *   2. Admin upload: files land under the caller's `owner` FK (no on-behalf upload).
  */
 
-import { apiClient, ApiResponse } from './client';
+import { apiClient, ApiResponse, type AuthScope } from './client';
+
+const ADMIN_SCOPE: AuthScope = 'admin';
 
 /** Global document counts from GET /documents/admin/ (`stats`); not affected by ?search=. */
 export interface DocumentAdminStats {
@@ -217,7 +219,7 @@ export class AdminAPI {
       | Document[]
       | Paginated<Document>
       | { count: number; results: Document[]; stats: DocumentAdminStats }
-    >(`/documents/admin/${qs({ search: options.search }, options.reload)}`);
+    >(`/documents/admin/${qs({ search: options.search }, options.reload)}`, ADMIN_SCOPE);
     const raw = response.data;
     if (raw && typeof raw === 'object' && !Array.isArray(raw) && 'results' in raw && 'stats' in raw) {
       const env = raw as { count: number; results: Document[]; stats: DocumentAdminStats };
@@ -240,7 +242,7 @@ export class AdminAPI {
   }
 
   static async getDocument(id: number): Promise<ApiResponse<Document>> {
-    return apiClient.get<Document>(`/documents/${id}/`);
+    return apiClient.get<Document>(`/documents/${id}/`, ADMIN_SCOPE);
   }
 
   /**
@@ -255,17 +257,17 @@ export class AdminAPI {
     const formData = new FormData();
     formData.append('source_file', file);
     formData.append('title', title || file.name);
-    return apiClient.post<DocumentUploadResponse>('/documents/', formData);
+    return apiClient.post<DocumentUploadResponse>('/documents/', formData, ADMIN_SCOPE);
   }
 
   static async deleteDocument(id: number): Promise<ApiResponse<void>> {
-    return apiClient.delete<void>(`/documents/${id}/`);
+    return apiClient.delete<void>(`/documents/${id}/`, ADMIN_SCOPE);
   }
 
   /** Admin-only delete of any document (global). */
   static async deleteDocumentAdmin(id: number, reload?: boolean): Promise<ApiResponse<void>> {
     const suffix = reload ? `?_cb=${Date.now()}` : '';
-    return apiClient.delete<void>(`/documents/admin/${id}/${suffix}`);
+    return apiClient.delete<void>(`/documents/admin/${id}/${suffix}`, ADMIN_SCOPE);
   }
 
   /**
@@ -278,7 +280,8 @@ export class AdminAPI {
   ): Promise<ApiResponse<{ message: string; document_id: number; job_id: string; status: string }>> {
     return apiClient.post<{ message: string; document_id: number; job_id: string; status: string }>(
       `/documents/${id}/ingest/`,
-      {}
+      {},
+      ADMIN_SCOPE
     );
   }
 
@@ -289,7 +292,7 @@ export class AdminAPI {
     if (reload) {
       params.set('_cb', String(Date.now()));
     }
-    return apiClient.get<AnalyticsStats>(`/ai/analytics/?${params.toString()}`);
+    return apiClient.get<AnalyticsStats>(`/ai/analytics/?${params.toString()}`, ADMIN_SCOPE);
   }
 
   /**
@@ -318,7 +321,8 @@ export class AdminAPI {
           max_confidence: options.maxConfidence,
         },
         options.reload
-      )}`
+      )}`,
+      ADMIN_SCOPE
     );
     const raw = response.data;
     if (raw && typeof raw === 'object' && !Array.isArray(raw) && 'results' in raw && 'stats' in raw) {
@@ -347,7 +351,7 @@ export class AdminAPI {
   ): Promise<ApiResponse<{ count: number; results: AdminUser[]; stats: AdminUserStats }>> {
     const response = await apiClient.get<
       AdminUser[] | Paginated<AdminUser> | { count: number; results: AdminUser[]; stats: AdminUserStats }
-    >(`/accounts/users/${qs({ search: options.search }, options.reload)}`);
+    >(`/accounts/users/${qs({ search: options.search }, options.reload)}`, ADMIN_SCOPE);
     const raw = response.data;
     if (raw && typeof raw === 'object' && !Array.isArray(raw) && 'results' in raw && 'stats' in raw) {
       const env = raw as { count: number; results: AdminUser[]; stats: AdminUserStats };
@@ -367,11 +371,15 @@ export class AdminAPI {
     userId: number,
     role: string
   ): Promise<ApiResponse<AdminUser>> {
-    return apiClient.patch<AdminUser>(`/accounts/users/${userId}/`, { role });
+    return apiClient.patch<AdminUser>(`/accounts/users/${userId}/`, { role }, ADMIN_SCOPE);
   }
 
   static async deactivateUser(userId: number): Promise<ApiResponse<AdminUser>> {
-    return apiClient.patch<AdminUser>(`/accounts/users/${userId}/`, { is_active: false });
+    return apiClient.patch<AdminUser>(
+      `/accounts/users/${userId}/`,
+      { is_active: false },
+      ADMIN_SCOPE
+    );
   }
 
   /**
@@ -396,7 +404,8 @@ export class AdminAPI {
           is_helpful: options.isHelpful === undefined ? undefined : options.isHelpful ? 'true' : 'false',
         },
         options.reload
-      )}`
+      )}`,
+      ADMIN_SCOPE
     );
     const raw = response.data;
     if (raw && typeof raw === 'object' && !Array.isArray(raw) && 'results' in raw && 'stats' in raw) {

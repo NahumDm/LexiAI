@@ -12,41 +12,41 @@ function RouteSpinner() {
 
 /** `/login`: hide form while auth resolves; bounce guests and signed-in users away. */
 export function UserLoginGate({ children }: { children: ReactNode }) {
-  const { isAuthenticated, isGuest, isAdmin, isLoading } = useAuth();
+  const { isAuthenticated, isGuest, isAdminAuthenticated, isLoading } = useAuth();
 
   if (isLoading) return <RouteSpinner />;
   if (isGuest) return <Navigate to="/chat" replace />;
-  if (isAuthenticated) return <Navigate to={isAdmin ? '/admin' : '/chat'} replace />;
+  if (isAuthenticated) return <Navigate to="/chat" replace />;
+  if (isAdminAuthenticated) return <Navigate to="/admin" replace />;
   return <>{children}</>;
 }
 
-/** `/admin/login`: same, plus non-staff sessions → home (not user chat). */
+/** `/admin/login`: only an admin-session redirects away; user JWT does not count. */
 export function AdminLoginGate({ children }: { children: ReactNode }) {
-  const { isAuthenticated, isGuest, isAdmin, isLoading } = useAuth();
+  const { isAdminAuthenticated, isLoading } = useAuth();
 
   if (isLoading) return <RouteSpinner />;
-  if (isAuthenticated || isGuest) {
-    return <Navigate to={isAdmin ? '/admin' : '/'} replace />;
+  if (isAdminAuthenticated) return <Navigate to="/admin" replace />;
+  return <>{children}</>;
+}
+
+/** Authenticated non-admin users and guests (for `/chat`). */
+export function UserRoute({ children }: { children: ReactNode }) {
+  const { isAuthenticated, isGuest, isAdminAuthenticated, isLoading } = useAuth();
+
+  if (isLoading) return <RouteSpinner />;
+  if (!isAuthenticated && !isGuest) {
+    if (isAdminAuthenticated) return <Navigate to="/login" replace />;
+    return <Navigate to="/login" replace />;
   }
   return <>{children}</>;
 }
 
-/** Authenticated non-admin users and guests (for `/chat`). Admins → `/admin`. */
-export function UserRoute({ children }: { children: ReactNode }) {
-  const { isAuthenticated, isGuest, isAdmin, isLoading } = useAuth();
-
-  if (isLoading) return <RouteSpinner />;
-  if (!isAuthenticated && !isGuest) return <Navigate to="/login" replace />;
-  if (isAdmin) return <Navigate to="/admin" replace />;
-  return <>{children}</>;
-}
-
-/** Staff dashboard: signed-in staff/superuser only. */
+/** Staff dashboard: requires admin storage session only. */
 export function AdminRoute({ children }: { children: ReactNode }) {
-  const { isAuthenticated, isGuest, isAdmin, isLoading } = useAuth();
+  const { isAdminAuthenticated, isLoading } = useAuth();
 
   if (isLoading) return <RouteSpinner />;
-  if (!isAuthenticated && !isGuest) return <Navigate to="/admin/login" replace />;
-  if (!isAdmin) return <Navigate to="/" replace />;
+  if (!isAdminAuthenticated) return <Navigate to="/admin/login" replace />;
   return <>{children}</>;
 }

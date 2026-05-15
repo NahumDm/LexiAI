@@ -11,7 +11,7 @@ import { useAuth } from '@/contexts/AuthContext';
 
 export default function LandingPage() {
   const navigate = useNavigate();
-  const { continueAsGuest, isAuthenticated, isAdminUser } = useAuth();
+  const { continueAsGuest, isAuthenticated, isAdminAuthenticated } = useAuth();
   const [showLogin, setShowLogin] = useState(false);
   const [showRegister, setShowRegister] = useState(false);
 
@@ -20,9 +20,9 @@ export default function LandingPage() {
   // with user routes).
   React.useEffect(() => {
     if (!isAuthenticated) return;
-    if (isAdminUser) return;
+    if (isAdminAuthenticated) return;
     navigate('/chat', { replace: true });
-  }, [isAuthenticated, isAdminUser, navigate]);
+  }, [isAuthenticated, isAdminAuthenticated, navigate]);
 
   const handleGuestClick = async () => {
     try {
