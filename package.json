@@ -1,0 +1,14 @@
+{
+  "name": "lexiai",
+  "private": true,
+  "description": "Monorepo root — Vercel builds the Vite app from frontend/",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "lint": "npm --prefix frontend run lint",
+    "test": "npm --prefix frontend run test"
+  }
+}
