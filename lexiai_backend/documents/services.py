@@ -9,12 +9,10 @@ import time
 from pathlib import Path
 from typing import Callable
 
-import pdfplumber
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
 from django.core.management.base import CommandError
-from pypdf import PdfReader
 
 from .models import Document
 
@@ -432,6 +430,8 @@ def extract_pdf_text(path: Path) -> str:
 
 
 def extract_pdf_text_with_pdfplumber(path: Path) -> str:
+    import pdfplumber
+
     extracted_pages = []
     with pdfplumber.open(str(path)) as pdf:
         for page in pdf.pages:
@@ -442,6 +442,8 @@ def extract_pdf_text_with_pdfplumber(path: Path) -> str:
 
 
 def extract_pdf_text_with_pypdf(path: Path) -> str:
+    from pypdf import PdfReader
+
     try:
         reader = PdfReader(str(path))
     except Exception:

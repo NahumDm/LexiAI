@@ -13,7 +13,7 @@ export function Footer() {
             <div className="flex items-center gap-2">
               <Mail className="h-4 w-4" />
               <a href="mailto:supportLexiAI@gmail.com" className="hover:text-secondary transition-colors">
-                supportLexiAI@gmail.com
+                nahomdesta.dev@gmail.com
               </a>
             </div>
             <span>© {new Date().getFullYear()} LexiTax AI</span>

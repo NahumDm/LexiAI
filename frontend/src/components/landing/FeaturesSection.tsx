@@ -25,7 +25,7 @@ const features = [
   {
     icon: BookOpen,
     title: 'Comprehensive Coverage',
-    description: 'Access to a vast library of Nigerian tax laws, regulations, and guidelines.',
+    description: 'Access to a vast library of Ethiopian tax laws, regulations, and guidelines.',
   },
   {
     icon: Shield,

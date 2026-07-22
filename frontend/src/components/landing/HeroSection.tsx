@@ -32,7 +32,7 @@ export function HeroSection({ onLoginClick, onRegisterClick, onGuestClick }: Her
           </h1>
 
           <p className="text-lg sm:text-xl text-white/80 mb-10 max-w-2xl mx-auto animate-slide-up leading-relaxed">
-            Get instant, citation-backed answers to your Nigerian tax law questions. 
+            Get instant, citation-backed answers to your Ethiopian tax law questions. 
             Powered by AI, grounded in authoritative legal documents.
           </p>
 
