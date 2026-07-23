@@ -388,6 +388,14 @@ class ApiClient {
     const isAuthCall = isAuthEndpoint(endpoint);
 
     try {
+      if (!this.baseUrl && !import.meta.env.DEV) {
+        return {
+          status: 0,
+          error:
+            'API base URL is not configured. In Vercel → Project Settings → Environment Variables, set VITE_API_BASE_URL to your Railway HTTPS origin (e.g. https://xxx.up.railway.app, no trailing slash), then Redeploy the frontend.',
+        };
+      }
+
       const prefix = this.baseUrl ? `${this.baseUrl}/api/` : `/api/`;
       const url = endpoint.startsWith('http') ? endpoint : `${prefix}${this.apiVersion}${endpoint}`;
 
@@ -485,8 +493,10 @@ class ApiClient {
               ? String(errObj._nonJsonBody).replace(/\s+/g, ' ').trim().slice(0, 200)
               : '';
         const hintMissingApi =
-          response.status === 404 && !this.baseUrl && !import.meta.env.DEV
-            ? ' This often means VITE_API_BASE_URL was not set at build time, so the browser called /api/… on the Vercel host (no API there). Set VITE_API_BASE_URL to your backend origin (e.g. https://xxx.up.railway.app) and redeploy the frontend.'
+          (response.status === 404 || response.status === 405) &&
+          !this.baseUrl &&
+          !import.meta.env.DEV
+            ? ' This usually means VITE_API_BASE_URL was not set at build time, so the browser called /api/… on the Vercel host (static SPA — POST returns 405). Set VITE_API_BASE_URL to your Railway API origin (e.g. https://xxx.up.railway.app, no trailing slash) in Vercel → Settings → Environment Variables → Production, then Redeploy.'
             : '';
 
         const fallback =
