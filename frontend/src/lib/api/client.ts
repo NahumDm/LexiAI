@@ -128,8 +128,9 @@ class ApiClient {
 
   constructor() {
     const envBase = import.meta.env.VITE_API_BASE_URL as string | undefined;
-    if (envBase !== undefined && envBase !== '') {
-      this.baseUrl = envBase.replace(/\/$/, '');
+    const normalized = this.normalizeApiBaseUrl(envBase);
+    if (normalized) {
+      this.baseUrl = normalized;
     } else if (import.meta.env.DEV) {
       // Dev: rely on Vite proxy (see vite.config.ts) so we stay same-origin.
       this.baseUrl = '';
@@ -145,6 +146,22 @@ class ApiClient {
     this.apiVersion = import.meta.env.VITE_API_VERSION || 'v1';
 
     this.migrateLegacyStorage();
+  }
+
+  /**
+   * Normalize Vercel/Railway API origins.
+   * A bare host like `foo.up.railway.app` (missing https://) becomes a relative
+   * path in fetch() and hits Vercel instead of Django — common cause of 404/405.
+   */
+  private normalizeApiBaseUrl(raw: string | undefined): string {
+    let value = (raw ?? '').trim();
+    if (!value) return '';
+    value = value.replace(/\/$/, '');
+    if (/^https?:\/\//i.test(value)) return value;
+    if (/^[a-z0-9.-]+\.[a-z]{2,}(:\d+)?(\/.*)?$/i.test(value)) {
+      return `https://${value}`;
+    }
+    return value;
   }
 
   // --- Storage (localStorage with sessionStorage fallback) -----------------
