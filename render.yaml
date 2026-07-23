@@ -1,0 +1,46 @@
+# Render Blueprint — Celery worker for LexiAI
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Dashboard alternative (same settings):
+#   New → Background Worker → Language/Runtime: Docker
+#   Dockerfile Path: ./Dockerfile
+#   Docker Command: bash worker.sh
+#   Root Directory: (leave empty = repo root)
+
+services:
+  - type: worker
+    name: lexiai-celery-worker
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: bash worker.sh
+    autoDeploy: true
+    envVars:
+      - key: DJANGO_SETTINGS_MODULE
+        value: lexiai_backend.settings.prod
+      - key: SECRET_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: MISTRAL_API_KEY
+        sync: false
+      - key: AI_LLM_BACKEND
+        value: mistral
+      - key: CELERY_WORKER_SKIP_EMBEDDING_WARMUP
+        value: "1"
+      - key: OMP_NUM_THREADS
+        value: "1"
+      - key: MKL_NUM_THREADS
+        value: "1"
+      - key: OPENBLAS_NUM_THREADS
+        value: "1"
+      - key: NUMEXPR_NUM_THREADS
+        value: "1"
+      - key: TOKENIZERS_PARALLELISM
+        value: "false"
